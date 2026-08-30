@@ -1,0 +1,79 @@
+{
+  "dict": 0,
+  "marker_mm": 35.0,
+  "gap_mm": 12.0,
+  "strips": [
+    {
+      "strip": 0,
+      "ids": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "centres_mm": [
+        23.5,
+        70.5,
+        117.5,
+        164.5
+      ],
+      "centre_y_mm": 23.5,
+      "strip_w_mm": 188.0,
+      "strip_h_mm": 47.0
+    },
+    {
+      "strip": 1,
+      "ids": [
+        4,
+        5,
+        6,
+        7
+      ],
+      "centres_mm": [
+        23.5,
+        70.5,
+        117.5,
+        164.5
+      ],
+      "centre_y_mm": 23.5,
+      "strip_w_mm": 188.0,
+      "strip_h_mm": 47.0
+    },
+    {
+      "strip": 2,
+      "ids": [
+        8,
+        9,
+        10,
+        11
+      ],
+      "centres_mm": [
+        23.5,
+        70.5,
+        117.5,
+        164.5
+      ],
+      "centre_y_mm": 23.5,
+      "strip_w_mm": 188.0,
+      "strip_h_mm": 47.0
+    },
+    {
+      "strip": 3,
+      "ids": [
+        12,
+        13,
+        14,
+        15
+      ],
+      "centres_mm": [
+        23.5,
+        70.5,
+        117.5,
+        164.5
+      ],
+      "centre_y_mm": 23.5,
+      "strip_w_mm": 188.0,
+      "strip_h_mm": 47.0
+    }
+  ]
+}

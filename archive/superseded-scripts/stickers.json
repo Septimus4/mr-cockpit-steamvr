@@ -1,0 +1,12 @@
+{
+  "sticker_mm": 58.42,
+  "marker_mm": 35.05,
+  "quiet_mm": 11.68,
+  "bleed_mm": 3,
+  "sheet_mm": [
+    181.2,
+    255.6
+  ],
+  "count": 12,
+  "dict": "DICT_4X4_50"
+}
