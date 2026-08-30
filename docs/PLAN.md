@@ -350,6 +350,10 @@ so it can proceed even if verification turns up renderer problems.
 
 ### 3. Not blocking, pick up when convenient
 
+- [ ] **The old `vr-calib` folder is now an empty shell** holding only the dead venv.
+      Delete it once no shell is holding it open.
+- [ ] `git init` the rectus fork too, before the upstream PR work - the layer changes
+      are currently unversioned beyond the upstream checkout.
 - [ ] Order stickers: the 30 mm sheet, plus the 50 mm sheet to test with. The WinCtrl
       panels display their own markers, so stickers are only for the coaming and consoles.
 - [ ] **When they arrive: measure the vinyl-vs-screen gap.** One 30 mm and one 50 mm side

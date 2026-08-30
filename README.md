@@ -20,6 +20,17 @@ milestones, and the decisions log.
 | [docs/m04-vulkan.md](docs/m04-vulkan.md) | Vulkan parity |
 | [docs/m05-polygon-cutouts.md](docs/m05-polygon-cutouts.md) | arbitrary polygon cutouts |
 
+## Setup
+
+`uv` keeps its Python and cache inside the project (`.uvpython/`, `.uvcache/`), because
+this machine's shells run in an MSIX container where AppData writes are virtualised and
+break the default locations:
+
+    set UV_PYTHON_INSTALL_DIR=%CD%\.uvpython
+    set UV_CACHE_DIR=%CD%\.uvcache
+    uv venv --python 3.12 .venv
+    uv pip install --python .venv\Scripts\python.exe numpy opencv-contrib-python pillow openvr
+
 ## Tests
 
     .venv\Scripts\python.exe -m unittest discover -s tests      # 73, no hardware
