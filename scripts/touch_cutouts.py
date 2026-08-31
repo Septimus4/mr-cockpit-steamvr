@@ -17,8 +17,9 @@ draws them, and the buttons are the point.
   python scripts/touch_cutouts.py                measure cutouts
   python scripts/touch_cutouts.py --start 2      leave Quad0 and Quad1 alone
 
-TRIGGER  record a point        GRIP  undo the last point
-MENU     finish this cutout    hold MENU 2s  finish everything
+TRIGGER  record a point          GRIP  undo the last point
+MENU     finish this cutout       MENU with nothing pending  finish and write
+Ctrl+C   quit without writing
 """
 
 import argparse
@@ -178,7 +179,8 @@ def calibrate_tip(vr, index):
     print("  Rest the controller's tip in one spot that will not move - a screw head, a")
     print("  panel corner, a seam - and ROLL THE CONTROLLER AROUND IT in every direction")
     print("  you can while keeping the tip planted.")
-    print("\n  Hold the TRIGGER to record. Release when it says GOOD. ESC to abort.\n")
+    print("\n  Hold the TRIGGER to record. It stops on its own once the tip is pinned")
+    print("  down. Ctrl+C in this terminal quits without saving.\n")
 
     buttons = Buttons()
     poses = []
@@ -265,7 +267,9 @@ def measure_cutouts(vr, index, tip, start_index):
     print("\n  MEASURING")
     print("  Touch the corners of what you want to see through. Four corners for a panel,")
     print("  or walk the edge for an irregular console - the order you touch IS the shape.")
-    print("\n  TRIGGER record   GRIP undo   MENU finish this cutout   MENU again finish all\n")
+    print("\n  TRIGGER record   GRIP undo   MENU finish this cutout")
+    print("  MENU with nothing pending finishes and writes.")
+    print("  Ctrl+C in this terminal quits without writing anything.\n")
 
     buttons = Buttons()
     cutouts = []
@@ -370,7 +374,11 @@ def main():
                                          if len(controllers) > 1 else ""))
 
         if a.tip:
-            return 0 if calibrate_tip(vr, index) is not None else 1
+            try:
+                return 0 if calibrate_tip(vr, index) is not None else 1
+            except KeyboardInterrupt:
+                print("\n\n  Stopped. Nothing was saved.")
+                return 1
 
         tip = load_tip()
 
@@ -380,7 +388,14 @@ def main():
             return 1
 
         print(f"  tip offset {np.round(tip, 4)} m")
-        cutouts = measure_cutouts(vr, index, tip, a.start)
+
+        try:
+            cutouts = measure_cutouts(vr, index, tip, a.start)
+        except KeyboardInterrupt:
+            # Deliberately discards. Half-measured cutouts written to the config would be
+            # worse than none: a stale enabled quad looks exactly like a bad measurement.
+            print("\n\n  Stopped. Nothing was written.")
+            return 1
     finally:
         openvr.shutdown()
 

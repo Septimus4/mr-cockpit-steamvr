@@ -37,6 +37,9 @@ driver thinks you have.
 
     python scripts/touch_cutouts.py --tip
 
+It stops on its own once the tip is pinned down; Ctrl+C in the terminal quits
+without saving.
+
 Rest the tip in something that locates it — a screw head, a corner, a recess, not a flat
 surface — and roll the controller around it in every direction while holding the trigger.
 Each pose satisfies `R_i @ tip + p_i = centre` for one unknown tip and one unknown centre.
@@ -80,6 +83,7 @@ the distance between them.
 | grip | undo the last point |
 | menu | finish this cutout, then start the next |
 | menu with nothing pending | finish everything and write |
+| Ctrl+C in the terminal | quit without writing anything |
 
 **The order you touch is the shape.** Walking an edge is how a person describes an outline,
 and re-sorting the points would quietly turn a deliberate concave console into its convex
