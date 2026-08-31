@@ -6,6 +6,7 @@ fall back to a rectangle, or load a subtly different outline, with nothing to sa
 The tests below encode what shared/config_manager.h actually accepts.
 """
 
+import codecs
 import os
 import sys
 import tempfile
@@ -213,6 +214,58 @@ class TestWritePoints(unittest.TestCase):
 
         self.assertGreater(key_at, quads_at)
         self.assertLess(key_at, camera_at)
+
+
+class TestBomHandling(unittest.TestCase):
+    """
+    The layer writes config.ini with a UTF-8 BOM. Read it as plain utf-8 and the FIRST
+    section header parses as "﻿[Main]", which matches nothing - silently, and only
+    for the first section, so everything below it keeps working and the bug hides.
+
+    This was found the hard way: a key destined for [Main] was appended to the end of the
+    file instead, landing inside [Quads] and creating a duplicate. The fixtures above use
+    a plain file, so none of them caught it.
+    """
+
+    def setUp(self):
+        fd, self.path = tempfile.mkstemp(suffix=".ini")
+        os.close(fd)
+        with open(self.path, "wb") as f:
+            f.write(codecs.BOM_UTF8 + SAMPLE_INI.encode("utf-8"))
+
+    def tearDown(self):
+        os.unlink(self.path)
+
+    def test_first_section_is_still_found(self):
+        """[Main] is the first line, right after the BOM - the case that failed."""
+        from tracing.config_io import _read_ini
+        sections = _read_ini(self.path)
+        self.assertIn("Main", sections, "the BOM hid the first section header")
+        self.assertEqual(sections["Main"].get("ProjectionMode"), "3")
+
+    def test_quads_read_normally(self):
+        q = read_quads(self.path)[0]
+        self.assertTrue(q.enabled)
+        self.assertEqual(len(q.points), 4)
+
+    def test_write_preserves_the_bom(self):
+        """
+        The layer expects the file to start as it wrote it. Stripping the BOM on write
+        would change a file another program owns.
+        """
+        write_points(0, [(0, 0), (0.1, 0), (0.1, 0.1)], self.path)
+        with open(self.path, "rb") as f:
+            self.assertTrue(f.read(3) == codecs.BOM_UTF8, "the BOM was dropped on write")
+
+    def test_write_does_not_duplicate_or_relocate_keys(self):
+        write_points(0, [(0, 0), (0.1, 0), (0.1, 0.1)], self.path)
+        with open(self.path, encoding="utf-8-sig") as f:
+            text = f.read()
+
+        self.assertEqual(text.count("Quad0_Points"), 1, "key was duplicated")
+        self.assertEqual(text.count("ProjectionMode"), 1, "an unrelated key was duplicated")
+        self.assertLess(text.index("Quad0_Points"), text.index("[Camera]"),
+                        "key escaped the [Quads] section")
 
 
 if __name__ == "__main__":

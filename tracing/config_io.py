@@ -10,7 +10,9 @@ directly, which is the whole point: this is the one place a formatting slip woul
 invisible until something looked wrong in the headset.
 """
 
+import codecs
 import os
+import pathlib
 import re
 
 # Must equal MAX_QUAD_POLYGON_POINTS in shared/config_manager.h.
@@ -101,7 +103,7 @@ def _read_ini(path):
     sections = {}
     current = None
 
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
+    with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
         for line in f:
             s = line.strip()
 
@@ -174,8 +176,12 @@ def write_points(index, points, path=None):
     key = f"Quad{index}_Points"
     value = format_points(points)
 
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
+    with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
         lines = f.readlines()
+
+    # The layer writes this file with a UTF-8 BOM. utf-8-sig strips it on read, so it
+    # must be written back or the layer sees a file that no longer starts as it expects.
+    had_bom = pathlib.Path(path).read_bytes().startswith(codecs.BOM_UTF8)
 
     newline = "\r\n" if lines and lines[0].endswith("\r\n") else "\n"
 
@@ -208,7 +214,7 @@ def write_points(index, points, path=None):
         else:
             lines.insert(quads_end, f"{key} = {value}{newline}")
 
-    with open(path, "w", encoding="utf-8", newline="") as f:
+    with open(path, "w", encoding="utf-8-sig" if had_bom else "utf-8", newline="") as f:
         f.writelines(lines)
 
     return value
