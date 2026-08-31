@@ -31,17 +31,13 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from anchors.camera_rig import CAMERA_OFFSET, D_LEFT, K_LEFT
 from anchors.detect import detect_markers, make_detector, plate_size_overrides
 from anchors.solver import constellation_conditioning, is_coplanar, solve_markers
 from tracing.capture import hmd_matrix_to_numpy
 from tracing.geometry import Camera, camera_to_world_from_hmd
 
-K_LEFT = np.array([[1072.26851867, 0.0, 788.49299729],
-                   [0.0, 1072.31519651, 614.54444602],
-                   [0.0, 0.0, 1.0]])
-D_LEFT = np.array([0.08313216691950971, -0.10744697901181298,
-                   -0.00016821021003468, 0.00025331486744491, 0.0])
-CAMERA_OFFSET = (-0.031, -0.047, -0.138)
+
 
 
 def report(solutions):
@@ -219,10 +215,13 @@ def main():
         return 1
 
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
+    # The offset is baked into every stored camera pose, so recording WHICH offset was
+    # used is the only way a capture can be replayed correctly after a re-calibration.
     np.savez_compressed(a.out,
                         observations=np.array(observations, dtype=object),
                         frames=np.array(sorted(cameras)),
-                        cameras=np.array([cameras[k] for k in sorted(cameras)], dtype=object))
+                        cameras=np.array([cameras[k] for k in sorted(cameras)], dtype=object),
+                        camera_offset=np.array(CAMERA_OFFSET, float))
     print(f"\n  {len(observations)} observations over {len(cameras)} frames -> {a.out}")
 
     return report(solve_markers(observations, cameras))

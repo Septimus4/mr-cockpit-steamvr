@@ -123,6 +123,20 @@ in 5 mm steps.
 Accuracy expectations follow from this too. Reaching a button tolerates far more error
 than aligning to a screen edge would, so the 1.2-6.0 mm residuals measured here are ample.
 
+### The outline should follow the pit, not box it in
+
+`--shaped` produces ONE cutout whose outline traces the panels. Three across the top
+with one below the centre is a **T**, and a rectangle around that spends a third of its
+area on cockpit side wall — passthrough there covers the game rather than revealing a
+control. Measured on the real capture: 1413 cm2 against 2110 for the bounding box,
+**67% of the box**, in 8 points.
+
+Panels are grouped into rows by overlapping vertical extent, each row becomes one band,
+and the bands are walked down one side and back up the other. That covers T, inverted T,
+cross, L and a single row with no special cases, at four points per row — well inside
+the 32-point cap. Gaps between rows are closed, because an outline is one closed loop
+and cannot express two disconnected pieces.
+
 ### The centre console has no markers at all
 
 `--cover-all` puts ONE cutout over the whole assembly (530 x 430 mm by default), on the
@@ -154,7 +168,8 @@ Replays the last capture — no camera, no headset — and prints what it would 
 | `--capture PATH` | replay a different capture |
 | `--margin MM` | grow every cutout by MM on all sides |
 | `--start N` | first quad index, so earlier cutouts are left alone |
-| `--cover-all [WxH]` | one cutout over the whole assembly, mm, default `530x430` |
+| `--cover-all [WxH]` | one rectangle over the whole assembly, mm, default `530x430` |
+| `--shaped` | one cutout whose OUTLINE follows the panels — a T, not a box |
 | `--config PATH` | write somewhere else — useful for testing |
 
 Sweep once with `scripts/solve_anchors.py`, then place as many times as you like.

@@ -17,10 +17,13 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
+from anchors.camera_rig import (
+    CAMERA_OFFSET, CAMERA_OFFSET_LEGACY, apply_offset_delta, offset_delta,
+)
 from anchors.place import (
-    cover_all, cutout_extent, fit_plane_frame, fit_rigid, flattening_cost_mm,
-    group_by_plate, orient_frame_towards, place_from_markers, place_from_plate,
-    plate_local_points,
+    banded_outline, cover_all, cutout_extent, fit_plane_frame, fit_rigid,
+    flattening_cost_mm, group_by_plate, orient_frame_towards, panel_rects_in_plane,
+    place_from_markers, place_from_plate, plate_local_points, shaped_cutout,
 )
 from anchors.solver import (
     average_rotations, constellation_conditioning, is_coplanar, marker_object_points,
@@ -950,6 +953,211 @@ class TestCoverAll(unittest.TestCase):
         self.assertAlmostEqual(flattening_cost_mm(24.0, 0.4),
                                0.15 * 0.024 / 0.16 * 1000.0, places=6)
         self.assertEqual(flattening_cost_mm(24.0, 0.0), 0.0)
+
+
+def _polygon_area(points):
+    n = len(points)
+    return abs(sum(points[i][0] * points[(i + 1) % n][1] -
+                   points[(i + 1) % n][0] * points[i][1] for i in range(n))) / 2.0
+
+
+class TestBandedOutline(unittest.TestCase):
+    """
+    A pit is not a rectangle. Three panels across the top with one below the centre is a
+    T, and a bounding box around that spends a third of its area on cockpit side wall -
+    passthrough there covers the game instead of revealing a control.
+    """
+
+    TOP = [(-0.25, -0.09, 0.02, 0.20), (-0.08, 0.08, 0.02, 0.20),
+           (0.09, 0.25, 0.02, 0.20)]
+    STEM = [(-0.08, 0.08, -0.19, -0.01)]
+
+    def test_makes_a_T(self):
+        out = banded_outline(self.TOP + self.STEM)
+
+        self.assertEqual(len(out), 8, "a two-row T is eight corners")
+
+        xs = [p[0] for p in out]
+        ys = [p[1] for p in out]
+        self.assertAlmostEqual(min(xs), -0.25, places=6)
+        self.assertAlmostEqual(max(xs), 0.25, places=6)
+        self.assertAlmostEqual(max(ys), 0.20, places=6)
+        self.assertAlmostEqual(min(ys), -0.19, places=6)
+
+        # Only the stem reaches the bottom, so the bottom edge is the stem's width.
+        bottom = sorted(p[0] for p in out if abs(p[1] - min(ys)) < 1e-9)
+        self.assertAlmostEqual(bottom[1] - bottom[0], 0.16, places=6)
+
+    def test_uses_much_less_than_the_bounding_box(self):
+        out = banded_outline(self.TOP + self.STEM)
+        box = (0.50) * (0.39)
+
+        self.assertLess(_polygon_area(out) / box, 0.75)
+        self.assertGreater(_polygon_area(out) / box, 0.5)
+
+    def test_covers_every_rectangle(self):
+        """Whatever the shape, no panel may end up outside the outline."""
+        out = banded_outline(self.TOP + self.STEM)
+        xs = [p[0] for p in out]
+        ys = [p[1] for p in out]
+
+        for xmin, xmax, ymin, ymax in self.TOP + self.STEM:
+            self.assertGreaterEqual(xmin, min(xs) - 1e-9)
+            self.assertLessEqual(xmax, max(xs) + 1e-9)
+            self.assertGreaterEqual(ymin, min(ys) - 1e-9)
+            self.assertLessEqual(ymax, max(ys) + 1e-9)
+
+    def test_one_row_is_a_rectangle(self):
+        out = banded_outline(self.TOP)
+
+        self.assertEqual(len(out), 4, "collinear corners must be dropped")
+        self.assertAlmostEqual(_polygon_area(out), 0.50 * 0.18, places=9)
+
+    def test_gaps_between_rows_are_closed(self):
+        """
+        Two bands with a gap would be two disconnected pieces, and an outline is ONE
+        closed loop - it cannot express that at all.
+        """
+        out = banded_outline([(-0.2, 0.2, 0.1, 0.3), (-0.05, 0.05, -0.3, -0.1)])
+        ys = sorted({round(p[1], 6) for p in out})
+
+        self.assertEqual(len(ys), 3, "the two bands must meet at one shared edge")
+        self.assertAlmostEqual(ys[1], -0.0, places=6)
+
+    def test_fits_the_config_point_cap(self):
+        from tracing.config_io import MAX_POINTS
+
+        rows = [(-0.3 + 0.05 * i, 0.3 - 0.05 * i, 0.3 - 0.1 * i, 0.4 - 0.1 * i)
+                for i in range(6)]
+
+        self.assertLessEqual(len(banded_outline(rows)), MAX_POINTS)
+
+    def test_empty_input(self):
+        self.assertEqual(banded_outline([]), [])
+
+
+class TestShapedCutout(unittest.TestCase):
+
+    class _Sol:
+        def __init__(self, p, spread=1.0):
+            self.position = np.asarray(p, float)
+            self.position_spread_mm = spread
+
+    def _pit(self):
+        """Two panels across the top, one below - the real WinCtrl layout."""
+        sols = {}
+        placed = []
+        base = 0
+
+        for origin in [(-0.16, 0.89, -0.49), (0.21, 0.90, -0.48), (0.03, 0.69, -0.45)]:
+            pose = pose_to_matrix(origin, (-10.0, 0.0, 0.0))
+            for i, v in plate_local_points(PLATE_C).items():
+                sols[base + (i - 4)] = self._Sol(pose[:3, :3] @ v + pose[:3, 3])
+
+            plate = dict(PLATE_C)
+            plate["unit_mm"] = {"w": 167.0, "h": 185.0}
+            placed.append(place_from_plate(
+                plate, {i: sols[base + (i - 4)] for i in PLATE_C["ids"]}))
+            base += 4
+
+        return placed, sols
+
+    def test_produces_an_outline_that_beats_its_box(self):
+        placed, sols = self._pit()
+        got = shaped_cutout(placed, sols, viewpoint=(0.0, 1.1, -0.2))
+
+        self.assertIsNotNone(got)
+        self.assertGreaterEqual(len(got.points), 6)
+
+        box = got.width * got.height
+        self.assertLess(_polygon_area(got.points) / box, 0.9)
+
+    def test_outline_lies_in_the_cutout_plane(self):
+        """
+        The points are 2D in the cutout's own frame. Transforming them by the placement's
+        pose must land them on the panels - anything else means the frame is wrong, and a
+        wrong frame draws a plausible shape in the wrong place.
+        """
+        placed, sols = self._pit()
+        got = shaped_cutout(placed, sols, viewpoint=(0.0, 1.1, -0.2))
+
+        r = euler_xyz_to_matrix(*got.euler_deg)
+        world = [got.position + r @ np.array([x, y, 0.0]) for x, y in got.points]
+
+        for p in np.array([s.position for s in sols.values()]):
+            # every marker must sit within the outline's world-space bounding box
+            local = r.T @ (p - got.position)
+            self.assertLessEqual(abs(local[0]), got.width / 2 + 1e-6)
+            self.assertLessEqual(abs(local[1]), got.height / 2 + 1e-6)
+
+        self.assertEqual(len(world), len(got.points))
+
+    def test_needs_markers(self):
+        self.assertIsNone(shaped_cutout([], {}, viewpoint=(0, 1.1, 0)))
+
+    def test_panel_rects_are_axis_aligned_in_the_plane(self):
+        placed, sols = self._pit()
+        pts = np.array([s.position for s in sols.values()])
+        origin, r, _ = fit_plane_frame(pts)
+
+        rects = panel_rects_in_plane(placed, origin, r)
+
+        self.assertEqual(len(rects), 3)
+        for xmin, xmax, ymin, ymax in rects:
+            self.assertGreater(xmax - xmin, 0.15, "a 167 mm unit, roughly")
+            self.assertGreater(ymax - ymin, 0.15)
+
+
+class TestCameraRig(unittest.TestCase):
+    """
+    The camera offset is where the camera sits relative to the headset's TRACKING ORIGIN -
+    a virtual point inside the headset no ruler can reach. It is the least trustworthy
+    number in the chain, so changing it must be safe for captures already taken.
+    """
+
+    def test_delta_against_a_legacy_capture(self):
+        np.testing.assert_allclose(
+            offset_delta(CAMERA_OFFSET_LEGACY),
+            np.array(CAMERA_OFFSET) - np.array(CAMERA_OFFSET_LEGACY))
+
+        np.testing.assert_allclose(offset_delta(CAMERA_OFFSET), np.zeros(3), atol=0)
+
+    def test_missing_offset_is_assumed_legacy(self):
+        """Captures taken before the field existed all used the legacy value."""
+        np.testing.assert_allclose(offset_delta(None), offset_delta(CAMERA_OFFSET_LEGACY))
+
+    def test_shift_is_in_the_headset_frame_not_the_world(self):
+        """
+        The offset is defined in the headset's frame. Applying the delta in world axes is
+        right only for a head that never turned - which is exactly what a desk capture
+        looks like, so it would pass an eyeball test and fail in a real cockpit sweep.
+        """
+        from tracing.geometry import camera_to_world_from_hmd, euler_xyz_to_matrix
+
+        hmd = np.eye(4)
+        hmd[:3, :3] = euler_xyz_to_matrix(0.0, 90.0, 0.0)     # looking along -X
+        hmd[:3, 3] = [0.0, 1.1, 0.0]
+
+        old = Camera(np.eye(3), np.zeros(5),
+                     camera_to_world_from_hmd(hmd, CAMERA_OFFSET_LEGACY),
+                     image_size=(100, 100))
+        expected = camera_to_world_from_hmd(hmd, CAMERA_OFFSET)
+
+        shifted, delta = apply_offset_delta({0: old}, CAMERA_OFFSET_LEGACY)
+
+        np.testing.assert_allclose(shifted[0].camera_to_world[:3, 3],
+                                   expected[:3, 3], atol=1e-12)
+
+        # And the naive world-axis version would have been wrong here.
+        naive = old.camera_to_world[:3, 3] + delta
+        self.assertGreater(float(np.linalg.norm(naive - expected[:3, 3])), 1e-3)
+
+    def test_no_change_returns_the_same_cameras(self):
+        cams = {0: Camera(np.eye(3), np.zeros(5), np.eye(4), image_size=(10, 10))}
+        out, delta = apply_offset_delta(cams, CAMERA_OFFSET)
+
+        self.assertIs(out, cams)
+        np.testing.assert_allclose(delta, np.zeros(3))
 
 
 if __name__ == "__main__":

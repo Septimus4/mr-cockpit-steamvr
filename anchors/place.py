@@ -11,7 +11,7 @@ markers are plus however much panel lies outside them.
 
 import numpy as np
 
-from tracing.geometry import matrix_to_euler_xyz
+from tracing.geometry import euler_xyz_to_matrix, matrix_to_euler_xyz
 
 
 def fit_plane_frame(points):
@@ -74,6 +74,10 @@ class CutoutPlacement:
         self.marker_ids = marker_ids
         self.flatness_mm = flatness_mm
         self.spread_mm = spread_mm
+
+        # Traced outline in the cutout's own plane, in metres. Empty means the rectangle
+        # from width/height, which is what the C++ falls back to as well.
+        self.points = []
 
     def __repr__(self):
         return (f"{self.name}: {np.round(self.position, 4)} "
@@ -305,3 +309,147 @@ def flattening_cost_mm(deviation_mm, distance_m, baseline_m=0.15):
         return 0.0
 
     return float(baseline_m * (deviation_mm / 1000.0) / (distance_m ** 2) * 1000.0)
+
+
+def panel_rects_in_plane(placements, origin, r):
+    """
+    Each panel's unit rectangle, as (xmin, xmax, ymin, ymax) in the common plane.
+
+    The panels are not exactly coplanar, so projecting a tilted rectangle onto the common
+    plane foreshortens it slightly. That is the right behaviour: the outline has to
+    describe what the cutout covers ON ITS OWN PLANE, not what the panel measures on its.
+    """
+    rects = []
+
+    for c in placements:
+        hw, hh = c.width / 2.0, c.height / 2.0
+        panel = euler_xyz_to_matrix(*c.euler_deg)
+
+        corners = np.array([[-hw, -hh, 0.0], [hw, -hh, 0.0],
+                            [hw, hh, 0.0], [-hw, hh, 0.0]])
+        world = corners @ panel.T + c.position
+        local = (world - origin) @ r
+
+        rects.append((float(local[:, 0].min()), float(local[:, 0].max()),
+                      float(local[:, 1].min()), float(local[:, 1].max())))
+
+    return rects
+
+
+def banded_outline(rects, close_gaps=True):
+    """
+    A staircase outline covering every rectangle, banded by row.
+
+    A pit is not a rectangle. Three MFDs across the top with one below the centre is a T,
+    and a bounding box around that wastes most of its area on cockpit sides the pilot did
+    not ask to see - passthrough that is not wanted is passthrough that hides the game.
+
+    Rectangles are grouped into rows by overlapping vertical extent, each row becomes one
+    full-width band, and the bands are walked down one side and back up the other. That
+    covers T, inverted T, cross, L and a single row without special cases, and yields four
+    points per row - two rows is eight, well inside the 32-point cap.
+
+    `close_gaps` pulls consecutive bands together so the outline is a single closed loop.
+    A real pit has panels that touch or nearly touch, and a polygon in two disconnected
+    pieces cannot be expressed as one outline at all.
+    """
+    if not rects:
+        return []
+
+    ordered = sorted(rects, key=lambda t: -t[3])          # topmost first
+    bands = []
+
+    for xmin, xmax, ymin, ymax in ordered:
+        if bands and ymax > bands[-1][2] and ymin < bands[-1][3]:
+            b = bands[-1]
+            bands[-1] = [min(b[0], xmin), max(b[1], xmax),
+                         min(b[2], ymin), max(b[3], ymax)]
+        else:
+            bands.append([xmin, xmax, ymin, ymax])
+
+    if close_gaps:
+        for i in range(len(bands) - 1):
+            midpoint = (bands[i][2] + bands[i + 1][3]) / 2.0
+
+            if bands[i][2] > bands[i + 1][3]:             # a gap, not an overlap
+                bands[i][2] = midpoint
+                bands[i + 1][3] = midpoint
+
+    points = []
+
+    for xmin, xmax, ymin, ymax in bands:                  # down the right side
+        points.append((xmax, ymax))
+        points.append((xmax, ymin))
+
+    for xmin, xmax, ymin, ymax in reversed(bands):        # back up the left
+        points.append((xmin, ymin))
+        points.append((xmin, ymax))
+
+    return _drop_collinear(points)
+
+
+def _drop_collinear(points, tolerance=1e-6):
+    """
+    Remove points that lie on the line between their neighbours.
+
+    Bands of equal width would otherwise contribute duplicate corners, which the ear
+    clipper has to work around and which waste the 32-point budget for no shape.
+    """
+    if len(points) < 4:
+        return points
+
+    out = []
+    n = len(points)
+
+    for i in range(n):
+        a = np.array(points[i - 1], float)
+        b = np.array(points[i], float)
+        c = np.array(points[(i + 1) % n], float)
+
+        # numpy 2 removed the 2-vector cross product, so the z component is written out.
+        cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
+
+        if abs(cross) > tolerance:
+            out.append(points[i])
+
+    return out if len(out) >= 3 else points
+
+
+def shaped_cutout(placements, solutions, viewpoint, margin_mm=0.0):
+    """
+    ONE cutout whose OUTLINE follows the panels, instead of a rectangle around them.
+
+    The pose and plane are the same common fit `cover_all` uses; only the shape differs.
+    Returns the placement with its outline in `points`, in the cutout's own plane.
+    """
+    pts = np.array([s.position for s in solutions.values()])
+
+    if len(pts) < 3 or not placements:
+        return None
+
+    origin, r, _ = fit_plane_frame(pts)
+    r = orient_frame_towards(origin, r, viewpoint)
+
+    grow = margin_mm / 1000.0
+    rects = [(a - grow, b + grow, c - grow, d + grow)
+             for a, b, c, d in panel_rects_in_plane(placements, origin, r)]
+
+    outline = banded_outline(rects)
+
+    if len(outline) < 3:
+        return None
+
+    xs = [p[0] for p in outline]
+    ys = [p[1] for p in outline]
+
+    deviations = (pts - origin) @ r[:, 2]
+    span_mm = float(deviations.max() - deviations.min()) * 1000.0
+
+    ids = sorted(int(i) for i in solutions)
+    spread = float(np.mean([solutions[i].position_spread_mm for i in ids]))
+
+    out = CutoutPlacement("cockpit", origin, matrix_to_euler_xyz(r),
+                          max(xs) - min(xs), max(ys) - min(ys), ids, span_mm, spread)
+    out.points = outline
+
+    return out

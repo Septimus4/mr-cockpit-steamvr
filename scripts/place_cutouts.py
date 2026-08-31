@@ -32,8 +32,10 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from anchors.camera_rig import CAMERA_OFFSET, apply_offset_delta
 from anchors.place import (
     cover_all, flattening_cost_mm, place_from_markers, place_from_plate,
+    shaped_cutout,
 )
 from anchors.solver import solve_markers
 from tracing.config_io import MAX_QUADS, DEFAULT_CONFIG_PATH, QuadConfig, read_quads, write_quad
@@ -74,6 +76,17 @@ def menu_is_running():
         return None
 
     return MENU_PROCESS.lower() in out.stdout.lower()
+
+
+def _polygon_area(points):
+    """Shoelace area, for reporting how much of the bounding box an outline actually uses."""
+    n = len(points)
+
+    if n < 3:
+        return 0.0
+
+    return abs(sum(points[i][0] * points[(i + 1) % n][1] -
+                   points[(i + 1) % n][0] * points[i][1] for i in range(n))) / 2.0
 
 
 def load_display_plates():
@@ -207,6 +220,9 @@ def main():
                     help="grow every cutout by this many mm on all sides")
     ap.add_argument("--start", type=int, default=0,
                     help="first quad index to use, so earlier ones are left alone")
+    ap.add_argument("--shaped", action="store_true",
+                    help="ONE cutout whose OUTLINE follows the panels - a T for three "
+                         "across and one below - instead of a rectangle around them.")
     ap.add_argument("--cover-all", nargs="?", const="530x430", default=None,
                     metavar="WxH",
                     help="ONE cutout over the whole assembly instead of one per panel, "
@@ -223,6 +239,13 @@ def main():
     observations = list(z["observations"])
     cameras = {int(k): v for k, v in zip(z["frames"], z["cameras"])}
 
+    capture_offset = z["camera_offset"] if "camera_offset" in z.files else None
+    cameras, delta = apply_offset_delta(cameras, capture_offset)
+
+    if np.any(delta):
+        print(f"  capture predates the current camera calibration; shifting cameras by "
+              f"{np.round(delta * 1000, 1)} mm")
+
     solutions = solve_markers(observations, cameras)
     plates = load_display_plates()
 
@@ -231,7 +254,29 @@ def main():
 
     placed, loose = placements(solutions, plates, a.margin)
 
-    if a.cover_all:
+    if a.shaped:
+        head_now = head_frame(cameras)
+        viewpoint = head_now[0] if head_now else np.array([0.0, 1.2, 0.0])
+        single = shaped_cutout(placed, solutions, viewpoint, a.margin)
+
+        if single is None:
+            print("\n  Not enough solved markers to fit a common plane.")
+            return 1
+
+        box = single.width * single.height
+        area = _polygon_area(single.points)
+
+        print(f"\n  Outline follows the {len(placed)} panels: {len(single.points)} points, "
+              f"{area * 1e4:.0f} square cm")
+        print(f"  against {box * 1e4:.0f} for a rectangle around them - {100 * area / box:.0f}% "
+              f"of the box.")
+        print("  The rest of the box is cockpit side wall, and passthrough there would")
+        print("  cover the game rather than reveal a control.")
+
+        placed = [single]
+        loose = []
+
+    elif a.cover_all:
         try:
             w_mm, h_mm = (float(v) for v in a.cover_all.lower().split("x"))
         except ValueError:
@@ -266,10 +311,13 @@ def main():
         return 1
 
     head = head_frame(cameras)
-    describe(placed, loose, solutions, head, single=bool(a.cover_all))
+    describe(placed, loose, solutions, head, single=bool(a.cover_all or a.shaped))
 
     if head is not None:
-        total = sum(c.width * c.height for c in placed) * 1e4
+        # An outlined cutout covers its polygon, not its bounding box, and the
+        # difference is the whole point of having an outline.
+        total = sum(_polygon_area(c.points) or c.width * c.height
+                    for c in placed) * 1e4
         print(f"\n  Together these cutouts are {total:.0f} square cm of passthrough, and")
         print("  they are the ONLY passthrough if QuadsExclusive is on.")
 
@@ -322,10 +370,9 @@ def main():
         quad = QuadConfig(index, enabled=True, name=c.name,
                           position=c.position, euler_deg=c.euler_deg,
                           width=c.width, height=c.height,
-                          # Outlines are per-panel artwork; a rectangle is the honest
-                          # default and keeping any existing one would silently apply the
-                          # wrong shape to a newly placed panel.
-                          points=[])
+                          # Any outline comes from THIS placement. Keeping whatever was
+                          # there before would silently apply another panel's shape.
+                          points=getattr(c, "points", []))
         write_quad(quad, a.config)
         print(f"  Quad{index} <- {c.name}"
               + ("  (replaced " + existing[index].label + ")"
