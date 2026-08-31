@@ -211,6 +211,29 @@ Range is inferred from apparent size:
 so the directions to the markers are well measured and only the RANGE is in doubt. It
 depends on two numbers that could be wrong: the assumed marker size, and the focal length.
 
+**It can be measured, not guessed.** Each plate's marker layout is known, so fitting it
+*with* scale reads the error straight off — a constellation solved k times too big is
+solved k times too far, because range and apparent size are the same measurement. This is
+the counterpart to `fit_rigid` refusing scale: refusing it makes the error visible as
+residual, `measure_range_scale` says how big it is. `place_cutouts.py` reports it whenever
+it exceeds 2%.
+
+On the real capture:
+
+| plate | scale | residual | correction |
+|---|---|---|---|
+| winctrl-C | 1.0253 | 0.41 mm | `--range-scale 0.975` |
+| winctrl-R | 1.0811 | 2.87 mm | `--range-scale 0.925` |
+| winctrl-L | 1.0604 | 4.06 mm | `--range-scale 0.943` |
+
+Ordered by residual, because that is the only quality signal available without ground
+truth. The spread across plates is itself informative: winctrl-R's markers were only ever
+seen square-on, so its estimate is the least trustworthy of the three.
+
+A uniform **pixel-pitch** error would NOT appear here and must not be confused with this
+one — it scales the assumed marker size and the assumed spacing together, the two cancel,
+and k comes out 1. A non-unit k means size and spacing *disagree*.
+
 `--range-scale K` applies the correction where it physically belongs - on the assumed
 marker size - so every direction is untouched and only depth moves. Measured on the real
 capture, mean marker range is 0.425 m; `--range-scale 0.90` brings it to 0.383 m.

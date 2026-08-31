@@ -34,8 +34,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from anchors.camera_rig import CAMERA_OFFSET, apply_offset_delta
 from anchors.place import (
-    cover_all, flattening_cost_mm, place_from_markers, place_from_plate,
-    shaped_cutout,
+    cover_all, flattening_cost_mm, measure_range_scale, place_from_markers,
+    place_from_plate, shaped_cutout,
 )
 from anchors.solver import Observation, solve_markers
 from tracing.config_io import (
@@ -323,6 +323,28 @@ def main():
 
     print(f"  {len(observations)} observations over {len(cameras)} frames")
     print(f"  {len(solutions)} marker(s) solved, {len(plates)} display plate(s) configured")
+
+    measured = measure_range_scale(plates, solutions)
+
+    if measured and a.range_scale == 1.0:
+        best_name, best_k, best_res = measured[0]
+
+        if abs(best_k - 1.0) > 0.02:
+            print()
+            print("  RANGE LOOKS WRONG, measured against the plates' known geometry:")
+            print(f"    {'plate':14} {'scale':>7} {'residual':>10}   correction")
+
+            for name, k, res in measured:
+                print(f"    {name:14} {k:7.4f} {res:9.2f} mm   --range-scale {1 / k:.3f}")
+
+            print()
+            print(f"  Best conditioned is {best_name} at {best_k:.4f}, so the solve places")
+            print(f"  everything {(best_k - 1) * 100:+.1f}% too far. That is why a cutout can look")
+            print("  too SMALL and too FAR at once - a fixed size further away subtends less.")
+            print(f"    python scripts/place_cutouts.py --range-scale {1 / best_k:.3f} ...")
+            print()
+            print("  A uniform pixel-pitch error would NOT show here - it scales the marker")
+            print("  size and the spacing together and cancels. This means the two disagree.")
 
     placed, loose = placements(solutions, plates, a.margin)
 

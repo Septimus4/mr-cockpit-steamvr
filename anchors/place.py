@@ -653,3 +653,65 @@ def screen_rects_in_plane(placements, plates_by_name, origin, r, shrink_mm=0.0):
         rects.append([(float(x), float(y)) for x, y in local[:, :2]])
 
     return rects
+
+
+def fit_similarity(source, target):
+    """
+    Like `fit_rigid`, but WITH scale - Umeyama.
+
+    Returns (scale, rotation, translation, worst_residual_metres). `fit_rigid` deliberately
+    refuses scale so a range error shows up as residual instead of being absorbed; this is
+    the other half of that decision, used to MEASURE the error rather than hide it.
+    """
+    a = np.asarray(source, float).reshape(-1, 3)
+    b = np.asarray(target, float).reshape(-1, 3)
+
+    ca, cb = a.mean(axis=0), b.mean(axis=0)
+    a0, b0 = a - ca, b - cb
+
+    u, sv, vt = np.linalg.svd(a0.T @ b0)
+    d = np.sign(np.linalg.det(vt.T @ u.T))
+    r = vt.T @ np.diag([1.0, 1.0, d]) @ u.T
+
+    variance = float((a0 ** 2).sum())
+    scale = 1.0 if variance < 1e-12 else float((sv * np.array([1.0, 1.0, d])).sum() / variance)
+
+    t = cb - scale * (r @ ca)
+    worst = float(np.max(np.linalg.norm(b0 - a0 @ (scale * r).T, axis=1)))
+
+    return scale, r, t, worst
+
+
+def measure_range_scale(plates, solutions):
+    """
+    How far off the solved RANGE is, measured against the plates' known geometry.
+
+    This is the honest answer to "the pit looks too far away", and it needs no headset.
+    Each plate's marker layout is known, so fitting it WITH scale reads the error straight
+    off: a constellation solved k times too big is a constellation solved k times too far,
+    because range and apparent size are the same measurement.
+
+    The correction to apply is 1/k.
+
+    A uniform pixel-pitch error would NOT show up here and must not be confused with this
+    one: it scales the assumed marker size and the assumed spacing together, the two
+    cancel, and k comes out 1. A non-unit k means the size and the spacing DISAGREE.
+
+    Returns a list of (name, k, worst_residual_mm), best-conditioned first.
+    """
+    out = []
+
+    for plate in plates:
+        local = plate_local_points(plate)
+        have = [int(i) for i in plate["ids"] if int(i) in solutions and int(i) in local]
+
+        if len(have) < 3:
+            continue
+
+        source = np.array([local[i] for i in have])
+        target = np.array([solutions[i].position for i in have])
+
+        scale, _, _, worst = fit_similarity(source, target)
+        out.append((plate.get("name", "plate"), scale, worst * 1000.0))
+
+    return sorted(out, key=lambda row: row[2])

@@ -24,8 +24,8 @@ from anchors.place import (
     _segments_cross, banded_outline, bridge_hole, cover_all, cutout_extent,
     fit_plane_frame, fit_rigid, flattening_cost_mm, group_by_plate,
     orient_frame_towards, outline_with_holes, panel_rects_in_plane,
-    place_from_markers, place_from_plate, plate_local_points, rect_to_points,
-    shaped_cutout,
+    fit_similarity, measure_range_scale, place_from_markers, place_from_plate,
+    plate_local_points, rect_to_points, shaped_cutout,
 )
 from anchors.solver import (
     Observation, average_rotations, constellation_conditioning, is_coplanar,
@@ -1552,6 +1552,92 @@ class TestRangeScale(unittest.TestCase):
         for marker_id in base:
             np.testing.assert_allclose(same[marker_id].position,
                                        base[marker_id].position, atol=1e-12)
+
+
+class TestMeasureRangeScale(unittest.TestCase):
+    """
+    Reading the range error off the plates' KNOWN geometry, with no headset.
+
+    This is the counterpart to fit_rigid refusing scale. Refusing it makes a range error
+    show up as residual instead of being absorbed; measuring it here says how big it is.
+    """
+
+    class _Sol:
+        def __init__(self, p, spread=1.0):
+            self.position = np.asarray(p, float)
+            self.position_spread_mm = spread
+
+    def _solutions_at_scale(self, k, pose=None):
+        pose = pose if pose is not None else pose_to_matrix((0.0, 1.0, -0.6), (-20.0, 0, 0))
+        eye = np.array([0.0, 1.1, 0.0])
+
+        out = {}
+        for i, v in plate_local_points(PLATE_C).items():
+            true = pose[:3, :3] @ v + pose[:3, 3]
+            out[i] = self._Sol(eye + k * (true - eye))     # scaled about the eye
+
+        return out
+
+    def test_reads_back_a_known_scale(self):
+        for k in (0.90, 0.975, 1.0, 1.05, 1.10):
+            got = measure_range_scale([PLATE_C], self._solutions_at_scale(k))
+
+            self.assertEqual(len(got), 1)
+            self.assertAlmostEqual(got[0][1], k, delta=0.002,
+                                   msg=f"scaling by {k} must read back as {k}")
+
+    def test_a_correct_solve_measures_one(self):
+        got = measure_range_scale([PLATE_C], self._solutions_at_scale(1.0))
+
+        self.assertAlmostEqual(got[0][1], 1.0, places=6)
+        self.assertLess(got[0][2], 1e-6, "an exact solve leaves no residual")
+
+    def test_results_are_ordered_by_confidence(self):
+        """
+        Best-conditioned first, because the caller acts on the top row. Ordering by
+        residual is the only quality signal available without ground truth.
+        """
+        good = dict(PLATE_C, name="good")
+        sols = self._solutions_at_scale(1.05)
+
+        noisy = {i: self._Sol(s.position + np.array([0.004, -0.003, 0.002]))
+                 for i, s in sols.items()}
+
+        got = measure_range_scale([good], sols)
+        got_noisy = measure_range_scale([good], noisy)
+
+        self.assertLess(got[0][2], got_noisy[0][2])
+
+    def test_a_plate_with_too_few_markers_is_skipped(self):
+        sols = self._solutions_at_scale(1.0)
+        del sols[6], sols[7]
+
+        self.assertEqual(measure_range_scale([PLATE_C], sols), [])
+
+
+class TestFitSimilarity(unittest.TestCase):
+
+    def test_recovers_scale_rotation_and_translation(self):
+        src = np.array([[0.0, 0.0, 0.0], [0.07, 0.0, 0.0],
+                        [0.07, 0.07, 0.0], [0.0, 0.07, 0.0]])
+        r_true = euler_xyz_to_matrix(-31.0, 17.0, 5.0)
+        t_true = np.array([0.2, 1.1, -0.6])
+
+        k, r, t, worst = fit_similarity(src, 1.07 * (src @ r_true.T) + t_true)
+
+        self.assertAlmostEqual(k, 1.07, places=9)
+        np.testing.assert_allclose(r, r_true, atol=1e-9)
+        np.testing.assert_allclose(t, t_true, atol=1e-9)
+        self.assertLess(worst, 1e-12)
+
+    def test_never_returns_a_reflection(self):
+        rng = np.random.default_rng(5)
+
+        for _ in range(30):
+            k, r, _, _ = fit_similarity(rng.normal(size=(5, 3)), rng.normal(size=(5, 3)))
+
+            self.assertAlmostEqual(float(np.linalg.det(r)), 1.0, places=9)
+            self.assertGreater(k, 0.0)
 
 
 if __name__ == "__main__":
