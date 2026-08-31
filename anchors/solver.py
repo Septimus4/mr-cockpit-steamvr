@@ -114,13 +114,25 @@ class MarkerSolution:
     """Where one marker ended up, and how much to trust it."""
 
     def __init__(self, marker_id, pose, observations, position_spread_mm,
-                 angle_spread_deg, reprojection_px):
+                 angle_spread_deg, reprojection_px, max_skew=0.0, worst_mm=0.0):
         self.marker_id = marker_id
         self.pose = pose
         self.observations = observations
         self.position_spread_mm = position_spread_mm
         self.angle_spread_deg = angle_spread_deg
         self.reprojection_px = reprojection_px
+
+        # How obliquely this marker was ever seen. A marker only ever viewed SQUARE-ON is
+        # ambiguous: two poses reproject almost identically and the solver may pick
+        # either. Measured on real cockpit data - a panel mounted perpendicular to the
+        # pilot scattered 3x worse than its neighbours, and no amount of averaging fixed
+        # it, because every view had the same problem.
+        self.max_skew = max_skew
+
+        # The single furthest view, kept separately: a marker that is usually fine
+        # but occasionally wild is a different fault from one that is consistently
+        # noisy, and the robust spread alone cannot tell them apart.
+        self.worst_mm = worst_mm
 
     @property
     def position(self):
@@ -130,6 +142,21 @@ class MarkerSolution:
         return (f"Marker {self.marker_id}: {self.observations} obs, "
                 f"spread {self.position_spread_mm:.2f} mm / "
                 f"{self.angle_spread_deg:.2f} deg, reproj {self.reprojection_px:.2f} px")
+
+
+def view_skew(corners_px):
+    """
+    How far from square-on a marker was seen: 0 is perfectly perpendicular.
+
+    Computed from the difference between the two diagonals, which is zero for a square
+    seen head-on and grows with obliquity. Cheap, and it needs no pose.
+    """
+    p = np.asarray(corners_px, float).reshape(4, 2)
+    d0 = np.linalg.norm(p[0] - p[2])
+    d1 = np.linalg.norm(p[1] - p[3])
+    longest = max(d0, d1)
+
+    return 0.0 if longest < 1e-9 else float(abs(d0 - d1) / longest)
 
 
 def solve_markers(observations, cameras):
@@ -155,13 +182,14 @@ def solve_markers(observations, cameras):
             continue
 
         pose, err = solved
-        by_id.setdefault(obs.marker_id, []).append((pose, err))
+        by_id.setdefault(obs.marker_id, []).append((pose, err, view_skew(obs.corners_px)))
 
     out = {}
 
     for marker_id, entries in by_id.items():
-        poses = [p for p, _ in entries]
-        errs = [e for _, e in entries]
+        poses = [p for p, _, _ in entries]
+        errs = [e for _, e, _ in entries]
+        skews = [k for _, _, k in entries]
 
         positions = np.array([p[:3, 3] for p in poses])
         rotation = average_rotations([p[:3, :3] for p in poses])
@@ -171,18 +199,25 @@ def solve_markers(observations, cameras):
         pose[:3, :3] = rotation
         pose[:3, 3] = position
 
-        spread_mm = float(np.max(np.linalg.norm(positions - position, axis=1))) * 1000.0 \
-            if len(positions) > 1 else 0.0
+        # ROBUST spread, not the maximum. A max is dominated by one outlier and grows
+        # with sample count by construction: it reported 65 mm for a marker whose real
+        # scatter was 3.5 mm, and made captures of different lengths incomparable. This
+        # is a MAD-based sigma - half the views lie within it.
+        distances = np.linalg.norm(positions - position, axis=1) * 1000.0
+        spread_mm = float(1.4826 * np.median(distances)) if len(positions) > 1 else 0.0
+        worst_mm = float(np.max(distances)) if len(positions) > 1 else 0.0
 
         if len(poses) > 1:
             angles = [np.degrees(np.arccos(np.clip(
                 (np.trace(rotation.T @ p[:3, :3]) - 1) / 2, -1, 1))) for p in poses]
-            angle_spread = float(np.max(angles))
+            angle_spread = float(1.4826 * np.median(angles))
         else:
             angle_spread = 0.0
 
         out[marker_id] = MarkerSolution(marker_id, pose, len(poses), spread_mm,
-                                        angle_spread, float(np.mean(errs)))
+                                        angle_spread, float(np.mean(errs)),
+                                        float(np.max(skews)) if skews else 0.0,
+                                        worst_mm)
 
     return out
 

@@ -385,6 +385,38 @@ Worth noting for the eventual C++ port: the layer has the camera frame and the p
 together and can timestamp both, so it can do better than this - but pausing is the
 correct behaviour regardless.
 
+### M06 accuracy, settled 2026-08-31
+
+Four real captures, each one narrowing the error. Final: **3.3 - 4.3 mm robust spread** on
+the well-observed panels, against a ~20 mm alignment budget.
+
+| cause | effect | fix |
+|-------|--------|-----|
+| marker size from the id, but panels display a different size | 28% scale error | display plates declare their own size |
+| camera/pose time skew during head motion | 34 -> 15 mm | capture only while the head is still |
+| **corner refinement off by OpenCV default** | **9 -> 3.5 mm** | `CORNER_REFINE_SUBPIX` |
+| camera rotation from calibration | under 3% | not the problem |
+| camera offset, best fit 23 mm away | 6% | not the problem |
+| ambiguity flips | 10% | already handled by medoid averaging |
+
+The last two rows matter as much as the first three: ruling them out is what pointed at
+corner refinement. The arithmetic said 9 mm at 0.5 m from a 70-pixel marker implied ~0.9 px
+of corner noise, which is far worse than ArUco manages - and OpenCV defaults to
+CORNER_REFINE_NONE.
+
+**A marker only ever seen SQUARE-ON stays ambiguous.** One panel is mounted perpendicular
+to the pilot and was never viewed obliquely; its markers scatter 3x worse than their
+neighbours and averaging cannot fix it, because every view has the same problem. The tool
+now measures view obliquity per marker and says so.
+
+**The reported spread is robust (MAD), not a maximum.** A max is dominated by one outlier
+and grows with sample count, so it reported 65 mm for a marker whose real scatter was
+3.5 mm - and made captures of different lengths incomparable.
+
+None of this would have come from the synthetic tests, which build observations with a
+perfect camera model and no time skew. Running against the real cockpit before porting was
+worth more than the 110 tests for finding it.
+
 ### M07 — anchor-driven pose
 
 - express each cutout's pose relative to its anchor constellation

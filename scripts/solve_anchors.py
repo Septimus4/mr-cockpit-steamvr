@@ -52,13 +52,15 @@ def report(solutions):
 
     print(f"\n  {len(solutions)} marker(s) solved\n")
     print(f"  {'id':>4} {'obs':>4} {'x':>8} {'y':>8} {'z':>8}"
-          f" {'spread mm':>10} {'ang deg':>8} {'reproj px':>10}")
+          f" {'spread mm':>10} {'worst mm':>9} {'skew':>6} {'reproj px':>10}")
 
     for marker_id in sorted(solutions):
         s = solutions[marker_id]
         p = s.position
+        flag = "  <- only ever seen SQUARE-ON" if s.max_skew < 0.06 else ""
         print(f"  {marker_id:4d} {s.observations:4d} {p[0]:8.4f} {p[1]:8.4f} {p[2]:8.4f}"
-              f" {s.position_spread_mm:10.2f} {s.angle_spread_deg:8.2f} {s.reprojection_px:10.2f}")
+              f" {s.position_spread_mm:10.2f} {s.worst_mm:9.1f} {s.max_skew:6.3f}"
+              f" {s.reprojection_px:10.2f}{flag}")
 
     ordered = [solutions[i] for i in sorted(solutions)]
     aspect, verdict, extent = constellation_conditioning(ordered)
@@ -79,6 +81,14 @@ def report(solutions):
     if coplanar:
         print("  Coplanar sets cannot resolve the planar tilt ambiguity. Markers at")
         print("  differing depths - coaming as well as panel - would fix that.")
+
+    square_on = [s.marker_id for s in ordered if s.max_skew < 0.06]
+    if square_on:
+        print(f"\n  Markers {square_on} were only ever seen SQUARE-ON.")
+        print("  A perpendicular marker is ambiguous - two poses reproject almost")
+        print("  identically - and averaging cannot fix it, because every view has the")
+        print("  same problem. Look at that panel FROM AN ANGLE and capture again:")
+        print("  from the side, from above, not straight at it.")
 
     worst = max(s.position_spread_mm for s in ordered)
     if worst > 5.0:
