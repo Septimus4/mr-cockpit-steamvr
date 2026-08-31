@@ -352,6 +352,39 @@ a rebuild-and-restart cycle instead of a 0.3 second test run.
 The 104 tests are not throwaway - they are the SPECIFICATION. Once the C++ exists those
 cases become its acceptance criteria, and `render_frame` can generate fixtures for both.
 
+### First real anchor solve, 2026-08-31 — what it found
+
+527 observations of 12 panel markers across a continuous head sweep. Two findings, both
+of which only real data could have produced.
+
+**A design flaw: the id -> size map does not cover display panels.** Ids 0-11 were
+displayed at 32.8 mm but solved as the map's 22.4 mm, so every range came out 28% short -
+and because each view then placed the marker at the wrong distance along a DIFFERENT ray,
+the estimates scattered rather than simply being nearer. Fixed: display plates declare
+their own size. With it, the plate measures 70.8 mm against a true 69.0.
+
+**The dominant error is TIME SKEW, not calibration.** After the size fix, 34 mm of
+per-view disagreement remained. It is not the camera model:
+
+| tried | result |
+|-------|--------|
+| camera rotation from the calibration | 34.40 -> 33.46 mm (under 3%) |
+| best-fit camera offset, 92 mm from calibrated | 34.40 -> 29.73 mm |
+| filtering to frames where the head moved under 1 deg | 34.40 -> **15.13 mm** |
+
+Only the motion filter helped materially. A USB camera frame arrives buffered by tens of
+milliseconds while the headset pose is read now, so during head motion the image and the
+pose describe different instants. No camera calibration can fix that, which is why moving
+the offset 92 mm bought so little.
+
+**So the capture method was wrong, not the maths.** `solve_anchors.py` now captures only
+while the head is nearly stationary: look, hold still, move on. Holding still is not
+politeness, it is the measurement.
+
+Worth noting for the eventual C++ port: the layer has the camera frame and the pose
+together and can timestamp both, so it can do better than this - but pausing is the
+correct behaviour regardless.
+
 ### M07 — anchor-driven pose
 
 - express each cutout's pose relative to its anchor constellation

@@ -1,9 +1,15 @@
 """
 Solve where your markers are, from the camera.
 
-Sweep your head slowly across the cockpit while this runs. It watches for markers, and
-when you stop it solves each one's pose in play space and reports how much to trust the
-result.
+LOOK, THEN HOLD STILL. It captures only while your head is nearly stationary, moves on,
+and solves when you stop.
+
+The holding still is not politeness, it is the measurement. A USB camera frame arrives
+buffered by tens of milliseconds, and the headset pose is read now - so while the head is
+moving, the image and the pose describe different instants. Measured on a continuous
+sweep: 34 mm of per-view disagreement, which no camera calibration could fix. Neither
+adjusting the camera rotation nor moving its offset by 92 mm improved it, while simply
+filtering to slow frames halved it.
 
 The maths lives in anchors/ and is covered by 104 tests; this file is only the camera,
 the headset pose and the printing.
@@ -85,7 +91,10 @@ def report(solutions):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--seconds", type=float, default=15.0)
+    ap.add_argument("--seconds", type=float, default=45.0)
+    ap.add_argument("--still-deg", type=float, default=0.35,
+                    help="capture only when the head moves less than this between polls "
+                         "(default 0.35 deg)")
     ap.add_argument("--rate", type=float, default=5.0,
                     help="observations per second (default 5; detection is 5-20 ms and "
                          "there is no reason to run it faster)")
@@ -126,6 +135,8 @@ def main():
     start = time.time()
     interval = 1.0 / max(a.rate, 0.5)
     nxt = 0.0
+    last_pose = None
+    still = False
 
     try:
         while time.time() - start < a.seconds:
@@ -143,7 +154,20 @@ def main():
                     openvr.TrackingUniverseStanding, 0, openvr.k_unMaxTrackedDeviceCount)
                 hmd = poses[openvr.k_unTrackedDeviceIndex_Hmd]
 
+                still = False
+
                 if hmd.bPoseIsValid:
+                    pose_now = hmd_matrix_to_numpy(hmd.mDeviceToAbsoluteTracking)
+
+                    if last_pose is not None:
+                        r = last_pose[:3, :3].T @ pose_now[:3, :3]
+                        moved = np.degrees(np.arccos(np.clip((np.trace(r) - 1) / 2, -1, 1)))
+                        moved += np.linalg.norm(pose_now[:3, 3] - last_pose[:3, 3]) * 200.0
+                        still = moved < a.still_deg
+
+                    last_pose = pose_now
+
+                if hmd.bPoseIsValid and still:
                     cam = Camera(K_LEFT, D_LEFT,
                                  camera_to_world_from_hmd(
                                      hmd_matrix_to_numpy(hmd.mDeviceToAbsoluteTracking),
@@ -165,9 +189,12 @@ def main():
                             seen.add(marker_id)
 
             view = cv2.resize(left, (800, 600))
+            colour = (0, 255, 0) if still else (0, 165, 255)
+            cv2.putText(view, "CAPTURING - hold still" if still else "move, then HOLD STILL",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, colour, 2)
             cv2.putText(view, f"{a.seconds - now:4.1f}s  {len(observations)} obs  "
                               f"ids {sorted(i for i in seen)}",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                        (10, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             cv2.imshow("sweep the cockpit - q to finish", view)
 
             if (cv2.waitKey(1) & 0xFF) in (ord("q"), 27):
