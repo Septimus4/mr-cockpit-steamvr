@@ -86,6 +86,33 @@ Guessing wrong between those costs a headset session, and the check takes thirty
 It refuses to conclude anything if you turned through less than 45 degrees, because held
 one way a wrong offset looks perfect.
 
+### A rounded controller has no tip
+
+An Index controller's shell is curved, and that sets a floor this method cannot get under.
+
+If the contact region were a true **sphere**, rotation would cost nothing: a sphere resting
+on a point keeps its *centre* fixed, and the pivot fit converges on exactly that centre. It
+is not a sphere, so the centre of curvature wanders as the contact slides over the shell.
+
+Measured on an Index: **6.7 mm rms, 11.7 mm worst over 83 degrees** of wrist rotation. No
+amount of re-pivoting improves that, because the shape of the shell is not a calibration
+parameter — so the check judges against the alignment budget rather than against zero, and
+says so rather than sending you round a loop that cannot converge.
+
+| | |
+|---|---|
+| Index scatter, rms | 6.7 mm |
+| marker path, per-view spread | 9.5 mm |
+| out-of-plane budget at 0.6 m | 20 mm |
+
+Comfortably inside the budget, and about what the camera path achieved — while measuring
+the buttons rather than only the screen.
+
+To do better without a pointed probe: keep the controller at a **similar angle** for every
+corner of one panel. The error then lands the same way each time, so it shifts the cutout
+slightly instead of distorting it — and a shifted cutout is one slider to fix, where a
+distorted one is four.
+
 ## Measuring
 
     python scripts/touch_cutouts.py

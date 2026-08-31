@@ -206,22 +206,45 @@ def check_repeatability(vr, index, tip):
     turned = float(np.degrees(np.arccos(np.clip(
         np.min(dirs @ dirs.T), -1.0, 1.0))))
 
-    print(f"\n{len(points)} touches, wrist turned through {turned:.0f} deg")
+    print(f"\n  {len(points)} touches, wrist turned through {turned:.0f} deg")
     print(f"  scatter: {rms:.1f} mm rms, {worst:.1f} mm worst")
 
     if turned < 45.0:
-        print("\n  Not enough wrist rotation to test the tip offset. Turn further and")
-        print("  run it again - held one way, a wrong offset looks perfect.")
+        print("\n  Not enough wrist rotation to test anything. Turn further and run it")
+        print("  again - held one way, even a badly wrong offset looks perfect.")
         return 1
 
+    # A ROUNDED controller has no tip. If its contact region were a true sphere this would
+    # scatter by zero, because a sphere resting on a point keeps its CENTRE fixed under
+    # rotation and the pivot fit finds exactly that centre. It is not a sphere, so the
+    # centre of curvature wanders - and no amount of re-pivoting changes the shape of the
+    # shell. Telling the user to re-calibrate here would send them round a loop that
+    # cannot converge.
+    #
+    # So this is judged against the alignment budget, not against zero.
     if worst < 5.0:
-        print("\n  The tip offset is good. Points do not move as you rotate, so any error")
-        print("  in a measured cutout comes from WHERE you touched, not from this.")
+        print("\n  Excellent - the contact point barely moves as you rotate.")
         return 0
 
-    print(f"\n  The tip offset is off by roughly {worst / 2:.0f} mm. Points move as the")
-    print("  controller rotates, which is exactly what a wrong offset does. Re-run --tip,")
-    print("  and plant the tip in something that locates it rather than a flat surface.")
+    if worst < 15.0:
+        print(f"\n  Workable. {worst:.0f} mm is inside the ~20 mm alignment budget, and about")
+        print("  what the camera path managed - while measuring the BUTTONS rather than")
+        print("  just the screen.")
+        print()
+        print("  This is the floor for a rounded controller, not a calibration fault: with")
+        print("  no defined tip, the contact point slides over the shell as you turn. Do")
+        print("  not re-run --tip to chase it.")
+        print()
+        print("  To do better, keep the controller at a SIMILAR ANGLE for every corner of")
+        print("  one panel. The error then lands the same way each time, so it shifts the")
+        print("  cutout slightly instead of distorting it - and a shifted cutout is one")
+        print("  slider to fix, where a distorted one is four.")
+        return 0
+
+    print(f"\n  {worst:.0f} mm is too much even for reaching buttons. Either the contact")
+    print("  point changed between touches - the ring or the strap forcing a different")
+    print("  face onto the corner - or the pivot was done on a flat surface that let the")
+    print("  tip slide. Re-run --check touching deliberately with one face first.")
 
     return 1
 
