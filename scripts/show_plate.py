@@ -17,7 +17,7 @@ spec sheet.
     python scripts/show_plate.py --monitor 2 --panel-w 110 --ids 0,1,2,3
 
   KEYS   Tab      select edge (top/right/bottom/left/ALL)
-         arrows   move that edge inward/outward   (Shift = 10x)
+         arrows   move that edge by 1 PIXEL   (Shift = 10 pixels)
          [ ]      marker size  -  +
          b B      background dim / bright
          s        save geometry      r  reset
@@ -43,6 +43,9 @@ ap.add_argument("--margin", type=float, default=8.0, help="quiet zone, mm")
 ap.add_argument("--bg", type=int, default=255)
 ap.add_argument("--inset", default="0,0,0,0", help="top,right,bottom,left mm hidden by structure")
 ap.add_argument("--ruler", action="store_true")
+ap.add_argument("--edge-ruler", action="store_true",
+                help="red bars spanning the full framebuffer, edge to edge - measure between "
+                     "them to get the panel size directly, with nothing assumed")
 ap.add_argument("--name", default=None)
 ap.add_argument("--square", action="store_true")
 ap.add_argument("--dry-run", action="store_true")
@@ -67,22 +70,67 @@ if a.list or a.monitor is None:
 
 if MODE == "NONE":
     sys.exit("  ABORT: no DPI awareness, physical scale cannot be guaranteed")
-if a.panel_w is None:
+if a.panel_w is None and not a.edge_ruler:
     sys.exit("  --panel-w required: the measured visible width in mm")
 
 mon = mons[a.monitor]
-PITCH = a.panel_w / mon["w"]
+
+if a.edge_ruler:
+    # Two dimension lines spanning the framebuffer exactly, each with perpendicular end
+    # caps. Nothing is assumed - what you measure between a pair of caps IS the panel
+    # size. A missing cap means that edge is hidden by the mount, so one picture answers
+    # both "how big is it" and "can I see all of it".
+    W, H = mon["w"], mon["h"]
+    page = np.zeros((H, W, 3), np.uint8)
+
+    RED = (0, 0, 255)
+    t = max(3, W // 200)
+    capH = max(40, H // 12)
+    capW = max(40, W // 12)
+    ymid, xmid = H // 2, W // 2
+
+    # Horizontal dimension line, edge to edge, with VERTICAL caps at each end.
+    cv2.line(page, (0, ymid), (W - 1, ymid), RED, t)
+    cv2.rectangle(page, (0, ymid - capH // 2), (t - 1, ymid + capH // 2), RED, -1)
+    cv2.rectangle(page, (W - t, ymid - capH // 2), (W - 1, ymid + capH // 2), RED, -1)
+
+    # Vertical dimension line, edge to edge, with HORIZONTAL caps at each end.
+    cv2.line(page, (xmid, 0), (xmid, H - 1), RED, t)
+    cv2.rectangle(page, (xmid - capW // 2, 0), (xmid + capW // 2, t - 1), RED, -1)
+    cv2.rectangle(page, (xmid - capW // 2, H - t), (xmid + capW // 2, H - 1), RED, -1)
+
+    y = ymid + capH
+    for line in ("MEASURE CAP TO CAP", "",
+                 "4 caps visible =", "nothing is hidden", "",
+                 f"{W} x {H} px"):
+        if line:
+            cv2.putText(page, line, (xmid + 16, y), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55, (255, 255, 255), 1)
+        y += 26
+
+    page = page[:, :, ::-1].copy()
+
+    print(f"  monitor {a.monitor}: {W} x {H} px, caps at the exact framebuffer edges")
+    print("  Measure cap to cap - that is the panel size, with nothing assumed.")
+    print(f"  height/width must come out at {H}/{W} = {H/W:.4f}, which is the check.")
+    print("  A missing cap means that edge is hidden by the mount.")
+
+PITCH = (a.panel_w / mon["w"]) if a.panel_w else 1.0
 PANEL_H = mon["h"] * PITCH
 px = lambda v: int(round(v / PITCH))
-print(f"  monitor {a.monitor}: {mon['w']}x{mon['h']} px over {a.panel_w:.1f}x{PANEL_H:.1f} mm"
-      f"  ({PITCH:.5f} mm/px)")
+if not a.edge_ruler:
+    print(f"  monitor {a.monitor}: {mon['w']}x{mon['h']} px over {a.panel_w:.1f}x{PANEL_H:.1f} mm"
+          f"  ({PITCH:.5f} mm/px)")
 
 d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
 det = cv2.aruco.ArucoDetector(d, cv2.aruco.DetectorParameters())
 EDGES = ["top", "right", "bottom", "left", "ALL"]
 ruler_page = None
 
-if a.ruler:
+if a.edge_ruler:
+    ruler_page = page
+    a.ruler = True                 # reuse the ruler display path
+elif a.ruler:
     ruler_page = np.full((mon["h"], mon["w"]), a.bg, np.uint8)
     y = mon["h"] // 2
     cv2.line(ruler_page, (px(10), y), (px(110), y), 0, 3)
@@ -105,7 +153,7 @@ else:
         sys.exit(f"  invalid plate: {msg}")
     t_, r_, b_, l_ = [float(v) for v in a.inset.split(",")]
     ST = dict(top=t_, right=r_, bottom=b_, left=l_,
-              mk=a.marker_mm or 0.0, bg=a.bg, edge=0)
+              mk=a.marker_mm or 0.0, bg=a.bg, edge=0, showText=True)
 
 
 def build():
@@ -147,13 +195,31 @@ def build():
     n = 0 if fids is None else len(fids)
 
     txt = [f"edge: {EDGES[ST['edge']]}",
-           f"inset  T{ST['top']:.0f}  R{ST['right']:.0f}  B{ST['bottom']:.0f}  L{ST['left']:.0f} mm",
+           f"inset mm  T{ST['top']:.1f} R{ST['right']:.1f} B{ST['bottom']:.1f} L{ST['left']:.1f}",
+           f"inset px  T{ST['top']/PITCH:.0f} R{ST['right']/PITCH:.0f} "
+           f"B{ST['bottom']/PITCH:.0f} L{ST['left']/PITCH:.0f}   ({PITCH:.4f} mm/px)",
            f"marker {mk:.1f} mm   spread {sw:.0f}x{sh:.0f} mm   {asp:.2f}:1 {verdict}",
            f"self-detect {n}/{len(IDS)}",
-           "Tab edge   arrows move   [ ] size   s save   ESC quit"]
-    for i, t in enumerate(txt):
-        cv2.putText(page, t, (px(4), mon["h"] // 2 - px(12) + i * px(7)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, 60, 1)
+           "Tab edge  arrows 1px (Shift 10px)  [ ] size  h hide  s save  ESC"]
+
+    # The overlay goes in the clear band BETWEEN the marker rows, never over a marker.
+    # Dark text across a marker's white modules corrupts its bit pattern - it may still
+    # decode, but only by luck, and the failure would look like a detection problem
+    # rather than a drawing one.
+    if ST["showText"]:
+        band_top = cy0 + mk / 2.0
+        band_bot = cy0 + sh - mk / 2.0
+        line_mm = 6.5
+        block = line_mm * len(txt)
+
+        if band_bot - band_top >= block:
+            y0 = band_top + (band_bot - band_top - block) / 2.0
+            for i, t in enumerate(txt):
+                cv2.putText(page, t, (px(ux0 + 2), px(y0 + line_mm * (i + 0.75))),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.40, 60, 1)
+        else:
+            cv2.putText(page, "h for info", (px(ux0 + 2), px((band_top + band_bot) / 2)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.40, 60, 1)
 
     geom = dict(name=a.name or f"panel{a.monitor}", kind="display", monitor=a.monitor,
                 panel_px=[mon["w"], mon["h"]],
@@ -211,7 +277,10 @@ def key(e):
     if a.ruler:
         return
     k = e.keysym
-    step = 10.0 if (e.state & 0x1) else 1.0
+    # Pixels, not millimetres. The render is pixel-quantised so a fractional-pixel step
+    # changes nothing visible, and on a fine panel 1 mm can be several pixels - too
+    # coarse for nudging a marker clear of a bezel lip.
+    step = PITCH * (10.0 if (e.state & 0x1) else 1.0)
     if k == "Tab":
         ST["edge"] = (ST["edge"] + 1) % len(EDGES)
     elif k in ("Up", "Down", "Left", "Right"):
@@ -235,6 +304,10 @@ def key(e):
         ST["bg"] = max(40, ST["bg"] - 15)
     elif k == "B":
         ST["bg"] = min(255, ST["bg"] + 15)
+    elif k == "h":
+        # Hide the overlay once placement is settled, so nothing but markers is on the
+        # panel while it is being used for real.
+        ST["showText"] = not ST["showText"]
     elif k == "r":
         ST.update(top=0.0, right=0.0, bottom=0.0, left=0.0, mk=0.0, bg=a.bg)
     elif k == "s":
@@ -252,9 +325,19 @@ def key(e):
     redraw()
 
 
+# Deliberately NOT click-to-close, unlike show_1to1.py. This window is an editor: you
+# have to click it to give it keyboard focus, and closing on that click makes the Tab and
+# arrow controls unreachable. Click focuses instead.
+def _focus(_=None):
+    try:
+        win.focus_force()
+    except Exception:
+        pass
+
 for w in (win, cvs):
-    for b in ("<Escape>", "<KeyPress-q>", "<Button-1>"):
+    for b in ("<Escape>", "<KeyPress-q>"):
         w.bind(b, _close)
+    w.bind("<Button-1>", _focus)
     w.bind("<Key>", key)
 root.bind_all("<Escape>", _close)
 root.bind_all("<Key>", key)
