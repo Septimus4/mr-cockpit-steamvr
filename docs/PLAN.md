@@ -333,6 +333,25 @@ Remaining:
 
 - see [anchoring-config.md](anchoring-config.md)
 
+### The Python is a prototype, not the product
+
+A user must not need Python, a venv and two terminals to calibrate a cockpit, and an
+upstream PR could not contain any of it. Where each piece ends up:
+
+| piece | ends up in | why |
+|-------|-----------|-----|
+| detection, solving, async worker | the LAYER | it already owns the camera frames and the per-frame HMD poses, and already links OpenCV (`opencv_world4100.lib`) - so `solvePnP` and the ArUco detector are available where they are needed |
+| marker display on panels | the MENU | it owns windows and settings |
+| calibration UI, progress, verdict | the MENU | driven over IPC, like every other setting |
+| new IPC messages | shared | commands one way, the solved constellation back |
+
+**Order matters: prove it in Python, then port once.** Porting an unvalidated algorithm
+means debugging the algorithm and the port at the same time, in the harder language, with
+a rebuild-and-restart cycle instead of a 0.3 second test run.
+
+The 104 tests are not throwaway - they are the SPECIFICATION. Once the C++ exists those
+cases become its acceptance criteria, and `render_frame` can generate fixtures for both.
+
 ### M07 — anchor-driven pose
 
 - express each cutout's pose relative to its anchor constellation
