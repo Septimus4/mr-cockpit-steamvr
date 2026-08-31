@@ -135,3 +135,63 @@ def arc_of_head_poses(centre, radius, count, height=1.15, yaw_span_deg=40.0,
         poses.append(pose_to_matrix(pos, (pitch_deg, yaw, 0.0)))
 
     return poses
+
+
+def render_frame(camera, markers, size_mm_of, background=60, dictionary_name="DICT_4X4_50"):
+    """
+    Draw real ArUco markers into a synthetic camera frame.
+
+    This exists so the REAL detector can be tested, not a stand-in. Projecting corners is
+    enough to test the solver, but it assumes the detector returns corners in the order
+    and orientation we expect - and that assumption is exactly the kind that fails
+    silently, giving markers rotated by a multiple of 90 degrees.
+
+    Each marker is warped into the frame by the homography from its own image to its
+    projected corners, so what lands in the frame is a genuinely detectable marker seen
+    in perspective.
+    """
+    import cv2
+
+    w, h = camera.image_size
+    frame = np.full((h, w), background, np.uint8)
+    d = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, dictionary_name))
+
+    drawn = []
+
+    for marker_id, pose in markers.items():
+        corners = project_marker(camera, pose, size_mm_of[marker_id])
+
+        if corners is None:
+            continue
+
+        # A generous pixel size keeps the warp from losing detail when the marker is
+        # close; the homography handles the rest.
+        px = 240
+        img = cv2.aruco.generateImageMarker(d, marker_id, px, borderBits=1)
+
+        # A quiet zone is part of the marker as far as the detector is concerned.
+        quiet = px // 6
+        padded = np.full((px + 2 * quiet, px + 2 * quiet), 255, np.uint8)
+        padded[quiet:quiet + px, quiet:quiet + px] = img
+
+        n = padded.shape[0]
+        src = np.array([[0, 0], [n - 1, 0], [n - 1, n - 1], [0, n - 1]], np.float32)
+
+        # The projected corners are the MARKER's corners; expand outward for the quiet
+        # zone so the warp maps the padded image, not just the marker square.
+        c = np.asarray(corners, np.float32)
+        centre = c.mean(axis=0)
+        scale = (px + 2 * quiet) / float(px)
+        dst = (centre + (c - centre) * scale).astype(np.float32)
+
+        m = cv2.getPerspectiveTransform(src, dst)
+        warped = cv2.warpPerspective(padded, m, (w, h), flags=cv2.INTER_LINEAR,
+                                     borderMode=cv2.BORDER_TRANSPARENT,
+                                     dst=frame.copy())
+
+        # Composite only where the warp actually wrote, so markers do not erase each other.
+        mask = cv2.warpPerspective(np.full_like(padded, 255), m, (w, h))
+        frame = np.where(mask > 0, warped, frame).astype(np.uint8)
+        drawn.append(marker_id)
+
+    return frame, drawn

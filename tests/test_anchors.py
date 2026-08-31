@@ -21,7 +21,11 @@ from anchors.solver import (
     average_rotations, constellation_conditioning, is_coplanar, marker_object_points,
     solve_marker_pose, solve_markers,
 )
-from anchors.synthetic import arc_of_head_poses, marker_pose, observe, plate_markers
+from anchors.detect import detect_markers, is_diagnostic_id, make_detector, summarise
+from anchors.synthetic import (
+    arc_of_head_poses, marker_pose, observe, plate_markers, render_frame,
+)
+from tracing.geometry import Camera, camera_to_world_from_hmd
 from tracing.geometry import euler_xyz_to_matrix, pose_to_matrix
 
 
@@ -268,6 +272,135 @@ class TestRotationAveraging(unittest.TestCase):
 
         avg = average_rotations(mats)
         self.assertLess(angle_between(avg, good), 3.0)
+
+
+K_LEFT = np.array([[1072.26851867, 0.0, 788.49299729],
+                   [0.0, 1072.31519651, 614.54444602],
+                   [0.0, 0.0, 1.0]])
+D_LEFT = np.array([0.08313216691950971, -0.10744697901181298,
+                   -0.00016821021003468, 0.00025331486744491, 0.0])
+
+
+def camera_at(head_pose):
+    return Camera(K_LEFT, D_LEFT,
+                  camera_to_world_from_hmd(head_pose, (-0.031, -0.047, -0.138)))
+
+
+class TestDetectionEndToEnd(unittest.TestCase):
+    """
+    Renders REAL ArUco markers into a synthetic frame, runs the REAL detector over it,
+    and solves. Projecting corners by hand tests the solver but assumes the detector
+    returns them in the order we expect - and a wrong order does not fail, it rotates
+    every marker by a multiple of 90 degrees, which reads as a mounting error.
+    """
+
+    def _scene(self):
+        markers = plate_markers((0.0, 1.05, -0.62), (-20.0, 0.0, 0.0), 69.0,
+                                [0, 1, 2, 3], 32.8)
+        head = arc_of_head_poses((0.0, 0.0, -0.62), 0.62, 1)[0]
+        return markers, camera_at(head)
+
+    def test_detector_finds_every_marker(self):
+        markers, cam = self._scene()
+        frame, drawn = render_frame(cam, markers, {i: 32.8 for i in markers})
+
+        self.assertEqual(sorted(drawn), [0, 1, 2, 3], "the fixture did not draw them all")
+
+        obs, rejected = detect_markers(frame, cam)
+        self.assertEqual(sorted(o.marker_id for o in obs), [0, 1, 2, 3])
+        self.assertEqual(rejected, {})
+
+    def test_sizes_come_from_the_id_not_the_caller(self):
+        """ids 0-3 are the 30 mm sticker class, so 22.4 mm - regardless of what was drawn."""
+        markers, cam = self._scene()
+        frame, _ = render_frame(cam, markers, {i: 32.8 for i in markers})
+
+        obs, _ = detect_markers(frame, cam)
+        for o in obs:
+            self.assertAlmostEqual(o.size_mm, 22.4, places=3)
+
+    def test_poses_recovered_through_the_real_detector(self):
+        """
+        The end-to-end property. Sizes must match what was drawn for the poses to come
+        back, so this passes the true size explicitly rather than taking it from the id.
+        """
+        markers, cam = self._scene()
+        frame, _ = render_frame(cam, markers, {i: 32.8 for i in markers})
+
+        detector = make_detector()
+        obs, _ = detect_markers(frame, cam, detector=detector)
+
+        for o in obs:
+            o.size_mm = 32.8            # what the fixture actually drew
+
+        solutions = solve_markers(obs, {0: cam})
+        self.assertEqual(len(solutions), 4)
+
+        for marker_id, sol in solutions.items():
+            pos_err = np.linalg.norm(sol.position - markers[marker_id][:3, 3]) * 1000.0
+            ang_err = angle_between(sol.pose[:3, :3], markers[marker_id][:3, :3])
+
+            # Looser than the projected-corner tests: the detector works from rendered
+            # pixels, so it carries rasterisation error the ideal projection does not.
+            self.assertLess(pos_err, 6.0, f"marker {marker_id} off by {pos_err:.2f} mm")
+            self.assertLess(ang_err, 6.0, f"marker {marker_id} off by {ang_err:.2f} deg")
+
+    def test_no_markers_is_not_an_error(self):
+        _, cam = self._scene()
+        blank = np.full((1200, 1600), 60, np.uint8)
+
+        obs, rejected = detect_markers(blank, cam)
+        self.assertEqual(obs, [])
+        self.assertEqual(rejected, {})
+
+
+class TestIdGuards(unittest.TestCase):
+    """
+    A marker that is SEEN but not usable must be reported, never silently dropped -
+    "I stuck it on and nothing happened" is the failure this avoids.
+    """
+
+    def test_diagnostic_range(self):
+        self.assertTrue(is_diagnostic_id(32))
+        self.assertTrue(is_diagnostic_id(43))
+        self.assertFalse(is_diagnostic_id(31))
+        self.assertFalse(is_diagnostic_id(44))
+        self.assertFalse(is_diagnostic_id(0))
+
+    def test_diagnostic_markers_are_rejected_with_a_reason(self):
+        """
+        A test sheet in view carries ids whose size the id cannot be trusted for. Solving
+        one would put a marker of unknown scale into the constellation.
+        """
+        head = arc_of_head_poses((0.0, 0.0, -0.62), 0.62, 1)[0]
+        cam = camera_at(head)
+        markers = plate_markers((0.0, 1.05, -0.62), (-20.0, 0.0, 0.0), 69.0,
+                                [32, 33, 34, 35], 29.8)
+        frame, _ = render_frame(cam, markers, {i: 29.8 for i in markers})
+
+        obs, rejected = detect_markers(frame, cam)
+
+        self.assertEqual(obs, [], "a diagnostic marker was accepted")
+        self.assertTrue(rejected, "a diagnostic marker was dropped without a reason")
+        for why in rejected.values():
+            self.assertIn("diagnostic", why)
+
+    def test_unallocated_id_is_rejected(self):
+        head = arc_of_head_poses((0.0, 0.0, -0.62), 0.62, 1)[0]
+        cam = camera_at(head)
+        markers = plate_markers((0.0, 1.05, -0.62), (-20.0, 0.0, 0.0), 69.0,
+                                [44, 45, 46, 47], 30.0)
+        frame, _ = render_frame(cam, markers, {i: 30.0 for i in markers})
+
+        obs, rejected = detect_markers(frame, cam)
+
+        self.assertEqual(obs, [])
+        for why in rejected.values():
+            self.assertIn("size class", why)
+
+    def test_summary_mentions_what_was_skipped(self):
+        text = summarise([], {32: "diagnostic id - a test sheet is in view"})
+        self.assertIn("SKIPPED 32", text)
 
 
 if __name__ == "__main__":

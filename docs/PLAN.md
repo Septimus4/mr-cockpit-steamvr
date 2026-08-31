@@ -317,10 +317,18 @@ degrees and the error goes to zero. Every real cockpit panel is tilted, so the c
 breaks is the one that does not occur — the plate fixture, at a realistic -20 degrees,
 solves exactly from every viewpoint.
 
+- [x] `detect_markers` — sizes come from the id, never the caller. Markers that are seen
+      but unusable (diagnostic ids, unallocated ids) are REPORTED, not silently dropped
+- [x] `render_frame` — draws real ArUco into a synthetic frame, so the REAL detector is
+      tested. Projecting corners by hand assumes the detector's corner order, and a wrong
+      order does not fail: it rotates every marker by a multiple of 90 degrees
+- [x] `scripts/solve_anchors.py` — sweep the cockpit, solve, report conditioning
+
 Remaining:
 
-- [ ] detect markers in a real camera frame and feed the solver (needs the camera)
-- [ ] async at 5-10 Hz on a worker thread, never the render thread
+- [ ] run it against the real cockpit (needs the camera and markers up)
+- [ ] async at 5-10 Hz on a worker thread, never the render thread — this is C++ in the
+      layer, and the one thing that must not be got wrong
 - [ ] write solved poses into the config so cutouts ride them (M07)
 
 - see [anchoring-config.md](anchoring-config.md)
