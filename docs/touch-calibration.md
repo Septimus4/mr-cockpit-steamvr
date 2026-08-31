@@ -68,6 +68,24 @@ Measured on this rig: a wide pivot lands under 1 mm per axis, a 12-degree one ar
 The raw poses are saved alongside the result, so a calibration can be re-analysed — or
 re-solved by a better method — without asking for the pivot to be done again.
 
+## Checking the tip before you trust it
+
+    python scripts/touch_cutouts.py --check
+
+Touch one fixed point several times, turning your wrist as far as you can between touches.
+This separates two faults that look identical in a finished cutout:
+
+- **the tip offset is wrong** — points move as you rotate. The offset lives in controller
+  space and is rotated by each pose, so turning your wrist should change nothing. Fix by
+  re-running `--tip`.
+- **the contact point changed** — points move only when a different part of the controller
+  is touching. The offset is fine; you reached the corner differently. This is a real
+  problem on an Index, where the ring and strap block the front in a tight cockpit.
+
+Guessing wrong between those costs a headset session, and the check takes thirty seconds.
+It refuses to conclude anything if you turned through less than 45 degrees, because held
+one way a wrong offset looks perfect.
+
 ## Measuring
 
     python scripts/touch_cutouts.py

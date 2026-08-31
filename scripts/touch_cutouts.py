@@ -145,6 +145,87 @@ def warn_if_origin_moved(vr, saved):
     print("  What you measure now will be correct; what was stored before will not.")
 
 
+def check_repeatability(vr, index, tip):
+    """
+    Touch ONE fixed point repeatedly, holding the controller differently each time.
+
+    This separates two faults that look identical in a finished cutout. The tip offset
+    lives in CONTROLLER space and is rotated by each pose, so turning your wrist should
+    change nothing - if the points scatter as you rotate, the tip offset is wrong. If they
+    scatter only when you switch which PART of the controller is touching, the offset is
+    fine and the contact point is the problem, which matters on an Index where the ring
+    and strap block the front in a tight cockpit.
+
+    The distinction is worth the thirty seconds: one is fixed by re-pivoting, the other by
+    reaching the corner differently, and guessing wrong costs a headset session.
+    """
+    import openvr
+
+    print("\n  REPEATABILITY CHECK")
+    print("  Pick one fixed point - a screw head, a corner - and touch it several times,")
+    print("  TURNING YOUR WRIST as much as you can between touches. Same physical contact")
+    print("  point on the controller every time.")
+    print("\n  TRIGGER record   MENU finish   Ctrl+C quit\n")
+
+    buttons = Buttons()
+    points = []
+    angles = []
+
+    while True:
+        pose, mask = read_controller(vr, index)
+
+        if pose is None:
+            time.sleep(0.02)
+            continue
+
+        if buttons.pressed(mask, openvr.k_EButton_SteamVR_Trigger):
+            p = tip_position(pose, tip)
+            points.append(p)
+            angles.append(pose[:3, :3] @ np.array([0.0, 0.0, -1.0]))
+
+            spread = (float(np.max(np.linalg.norm(np.array(points) - np.mean(points, axis=0),
+                                                  axis=1))) * 1000.0) if len(points) > 1 else 0.0
+            print(f"    touch {len(points):2d}   worst {spread:5.1f} mm from the mean")
+
+        if buttons.pressed(mask, openvr.k_EButton_ApplicationMenu):
+            break
+
+        buttons.previous = mask
+        time.sleep(0.005)
+
+    if len(points) < 2:
+        print("\n  Need at least two touches.")
+        return 1
+
+    pts = np.array(points)
+    centre = pts.mean(axis=0)
+    worst = float(np.max(np.linalg.norm(pts - centre, axis=1))) * 1000.0
+    rms = float(np.sqrt(np.mean(np.sum((pts - centre) ** 2, axis=1)))) * 1000.0
+
+    dirs = np.array(angles)
+    turned = float(np.degrees(np.arccos(np.clip(
+        np.min(dirs @ dirs.T), -1.0, 1.0))))
+
+    print(f"\n{len(points)} touches, wrist turned through {turned:.0f} deg")
+    print(f"  scatter: {rms:.1f} mm rms, {worst:.1f} mm worst")
+
+    if turned < 45.0:
+        print("\n  Not enough wrist rotation to test the tip offset. Turn further and")
+        print("  run it again - held one way, a wrong offset looks perfect.")
+        return 1
+
+    if worst < 5.0:
+        print("\n  The tip offset is good. Points do not move as you rotate, so any error")
+        print("  in a measured cutout comes from WHERE you touched, not from this.")
+        return 0
+
+    print(f"\n  The tip offset is off by roughly {worst / 2:.0f} mm. Points move as the")
+    print("  controller rotates, which is exactly what a wrong offset does. Re-run --tip,")
+    print("  and plant the tip in something that locates it rather than a flat surface.")
+
+    return 1
+
+
 def find_controllers(vr, require_tracking=True):
     """Usable controllers or trackers, most-usable first."""
     rows = [r for r in survey(vr) if r["kind"] in ("controller", "tracker")]
@@ -394,6 +475,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--tip", action="store_true", help="calibrate the controller tip")
+    ap.add_argument("--check", action="store_true",
+                    help="touch ONE fixed point several times, holding the controller "
+                         "differently each time, and see how far apart they land. That "
+                         "isolates the tip calibration from everything else.")
     ap.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     ap.add_argument("--start", type=int, default=0)
     ap.add_argument("--force", action="store_true")
@@ -429,6 +514,19 @@ def main():
         index = controllers[0]
         print(f"  controller {index}" + (f" (+{len(controllers) - 1} more, using the first)"
                                          if len(controllers) > 1 else ""))
+
+        if a.check:
+            tip = load_tip()
+
+            if tip is None:
+                print("\n  Calibrate the tip first:  --tip")
+                return 1
+
+            try:
+                return check_repeatability(vr, index, tip)
+            except KeyboardInterrupt:
+                print("\n\n  Stopped.")
+                return 1
 
         if a.tip:
             try:
