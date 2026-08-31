@@ -8,6 +8,7 @@ The tests below encode what shared/config_manager.h actually accepts.
 
 import codecs
 import os
+import pathlib
 import sys
 import tempfile
 import unittest
@@ -15,7 +16,9 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tracing.config_io import (
-    MAX_POINTS, QuadConfig, format_points, parse_points, read_quads, write_points,
+    MAX_NAME, MAX_POINTS, QuadConfig, format_points, parse_points, read_quads,
+    write_keys,
+    write_points, write_quad,
 )
 
 SAMPLE_INI = """\
@@ -266,6 +269,124 @@ class TestBomHandling(unittest.TestCase):
         self.assertEqual(text.count("ProjectionMode"), 1, "an unrelated key was duplicated")
         self.assertLess(text.index("Quad0_Points"), text.index("[Camera]"),
                         "key escaped the [Quads] section")
+
+
+class TestWriteQuad(unittest.TestCase):
+    """
+    Writing a whole cutout, which is how a solved anchor becomes one.
+
+    The layer and the settings menu both own this file, so the danger is not a wrong
+    value - it is a write that drops or relocates lines this tool does not model, which
+    would look like the layer losing settings.
+    """
+
+    def setUp(self):
+        fd, self.path = tempfile.mkstemp(suffix=".ini")
+        os.close(fd)
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write(SAMPLE_INI)
+
+    def tearDown(self):
+        os.unlink(self.path)
+
+    def test_round_trips_a_whole_cutout(self):
+        q = QuadConfig(1, enabled=True, name="Centre panel",
+                       position=(0.02, 1.031, -0.588), euler_deg=(-27.4, 3.1, -0.8),
+                       width=0.118, height=0.1178,
+                       points=[(-0.05, -0.05), (0.05, -0.05), (0.05, 0.05)])
+        write_quad(q, self.path)
+
+        back = read_quads(self.path)[1]
+
+        self.assertTrue(back.enabled)
+        self.assertEqual(back.name, "Centre panel")
+        for a, b in zip(back.position, q.position):
+            self.assertAlmostEqual(a, b, places=5)
+        for a, b in zip(back.euler_deg, q.euler_deg):
+            self.assertAlmostEqual(a, b, places=3)
+        self.assertAlmostEqual(back.width, 0.118, places=5)
+        self.assertAlmostEqual(back.height, 0.1178, places=5)
+        self.assertEqual(len(back.points), 3)
+
+    def test_keys_missing_from_the_file_are_added_inside_the_section(self):
+        """
+        The sample has no Quad1_PosX. Appended to the END OF FILE it would land in
+        [Camera], where the layer's parser never looks - a silent no-op.
+        """
+        write_quad(QuadConfig(1, position=(0.5, 0.6, -0.7)), self.path)
+
+        with open(self.path, encoding="utf-8-sig") as f:
+            text = f.read()
+
+        self.assertEqual(text.count("Quad1_PosX"), 1)
+        self.assertLess(text.index("Quad1_PosX"), text.index("[Camera]"))
+        self.assertAlmostEqual(read_quads(self.path)[1].position[0], 0.5, places=5)
+
+    def test_leaves_other_cutouts_and_sections_untouched(self):
+        before = read_quads(self.path)[0]
+        write_quad(QuadConfig(1, name="new"), self.path)
+        after = read_quads(self.path)[0]
+
+        self.assertEqual(after.name, before.name)
+        self.assertEqual(after.position, before.position)
+        self.assertEqual(after.points, before.points)
+
+        with open(self.path, encoding="utf-8-sig") as f:
+            text = f.read()
+
+        self.assertIn("FloorHeightOffset = 0.0", text)
+        self.assertIn("CameraFrameLayout = 2", text)
+        self.assertEqual(text.count("[Quads]"), 1)
+
+    def test_rewriting_twice_does_not_grow_the_file(self):
+        write_quad(QuadConfig(2, name="a", position=(1, 2, 3)), self.path)
+        first = pathlib.Path(self.path).read_text(encoding="utf-8-sig")
+
+        write_quad(QuadConfig(2, name="a", position=(1, 2, 3)), self.path)
+        second = pathlib.Path(self.path).read_text(encoding="utf-8-sig")
+
+        self.assertEqual(first, second, "a repeated write must be idempotent")
+
+    def test_name_is_truncated_to_what_the_layer_can_hold(self):
+        """
+        Config_Quad::Name is char[16] read with _TRUNCATE. Writing a longer name would
+        make the file disagree with what the layer actually loads.
+        """
+        write_quad(QuadConfig(3, name="a-very-long-panel-name"), self.path)
+
+        back = read_quads(self.path)[3].name
+        self.assertEqual(len(back), MAX_NAME)
+        self.assertEqual(back, "a-very-long-pan")
+
+    def test_enabled_is_written_the_way_the_layer_writes_it(self):
+        write_quad(QuadConfig(3, enabled=True), self.path)
+
+        with open(self.path, encoding="utf-8-sig") as f:
+            self.assertIn("Quad3_Enabled = true", f.read())
+
+        self.assertTrue(read_quads(self.path)[3].enabled)
+
+    def test_write_keys_creates_a_missing_section(self):
+        fd, path = tempfile.mkstemp(suffix=".ini")
+        os.close(fd)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("[Main]\nProjectionMode = 0\n")
+
+            write_keys({"Quad0_PosX": "1.5"}, path)
+
+            self.assertAlmostEqual(read_quads(path)[0].position[0], 1.5, places=5)
+        finally:
+            os.unlink(path)
+
+    def test_write_keys_handles_a_file_with_no_final_newline(self):
+        """Otherwise the appended key gets glued onto the last line and vanishes."""
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write("[Quads]\nQuadSubdivisions = 1")
+
+        write_keys({"Quad0_PosY": "2.25"}, self.path)
+
+        self.assertAlmostEqual(read_quads(self.path)[0].position[1], 2.25, places=5)
 
 
 if __name__ == "__main__":

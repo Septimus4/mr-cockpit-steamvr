@@ -9,18 +9,20 @@ a headset on is slow enough that it would not get done.
     cd mr-cockpit-steamvr
     .venv\Scripts\python.exe -m unittest discover -s tests
 
-73 tests, ~0.2 s.
+141 tests, ~0.5 s.
 
 | file | area |
 |------|------|
 | `tests/test_geometry.py` | rotation convention, planes, ray-plane intersection, camera frame, back-projection round trip, polygon helpers, simplification |
 | `tests/test_config_io.py` | the ini format shared with the C++ parser, reading poses, writing outlines without disturbing the file |
 | `tests/test_capture.py` | OpenVR pose conversion, capture save/load, and the END-TO-END pipeline |
+| `tests/test_anchors.py` | marker detection, PnP solving, robust averaging, constellation conditioning, and turning solved markers into cutout poses |
 
 ## C++ — the mesh that actually ships
 
     cd rectus\src
-    testsun_tests.bat
+    tests
+un_tests.bat
 
 54 checks, builds `mesh.cpp` standalone against the project's own headers.
 
@@ -58,6 +60,23 @@ what makes the tracing tool iterable without a cockpit.
   mirror every traced outline
 - the ini format matches `Config_QuadShape::ParseConfig`, including its "fewer than three
   points means use the rectangle" rule and its 32-point cap
+- `matrix_to_euler_xyz` is the exact inverse of `euler_xyz_to_matrix`, round-tripped over
+  200 random orientations. An error here does not fail - it writes a cutout that is
+  rotated, which reads as bad tracking rather than a conversion bug
+- a plate's marker centres run Y DOWN (screen coordinates) while the cutout frame runs
+  Y up. A sign slip mirrors the cutout
+
+**Placement against a known layout.** `place_from_plate` fits a plate's measured marker
+layout onto its solved positions. The tests check that an exact pose comes back exactly,
+that the size comes from the measured panel rather than the marker bounding box (118 mm
+against 69 mm), that a marker displaced by 1 cm shows up as residual instead of being
+absorbed, and that `fit_rigid` never returns a reflection - which fits points beautifully
+and is not a pose.
+
+**Config writes that cannot silently no-op.** `config.ini` is owned by the layer and the
+settings menu, so a key appended at the end of the file would land in whatever section
+came last and never be read. The tests assert new keys land inside `[Quads]`, that
+unrelated sections survive untouched, and that a repeated write is byte-identical.
 
 A mismatch in any of these is silent in normal use, which is precisely why they are tested.
 

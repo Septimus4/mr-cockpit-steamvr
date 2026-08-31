@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tracing.geometry import (
     Camera, Plane, backproject_click, backproject_outline, camera_to_world_from_hmd,
-    euler_xyz_to_matrix, intersect_ray_plane, is_simple_polygon, polygon_signed_area,
+    euler_xyz_to_matrix, intersect_ray_plane, is_simple_polygon, matrix_to_euler_xyz,
+    polygon_signed_area,
     point_to_outline_distance, point_to_segment_distance, pose_to_matrix,
     rotation_x, rotation_y, rotation_z, simplify_outline,
 )
@@ -335,6 +336,52 @@ class TestSimplify(unittest.TestCase):
         blob = [(float((0.3 + 0.02 * np.cos(5 * a)) * np.cos(a)),
                  float((0.2 + 0.02 * np.sin(4 * a)) * np.sin(a))) for a in t]
         self.assertLessEqual(len(simplify_outline(blob, tolerance_m=0.004)), 32)
+
+
+class TestEulerInverse(unittest.TestCase):
+    """
+    matrix_to_euler_xyz turns a solved pose back into the RotX/RotY/RotZ the config
+    stores. It must invert euler_xyz_to_matrix exactly, because an error does not fail -
+    it writes a rotated cutout, which reads as bad tracking rather than a conversion bug.
+    """
+
+    def test_round_trip_over_many_orientations(self):
+        rng = np.random.default_rng(11)
+        for _ in range(200):
+            a = rng.uniform(-89.0, 89.0)       # avoid gimbal lock, tested separately
+            b = rng.uniform(-89.0, 89.0)
+            c = rng.uniform(-179.0, 179.0)
+
+            m = euler_xyz_to_matrix(a, b, c)
+            back = matrix_to_euler_xyz(m)
+
+            np.testing.assert_allclose(euler_xyz_to_matrix(*back), m, atol=1e-9)
+
+    def test_identity(self):
+        np.testing.assert_allclose(matrix_to_euler_xyz(np.eye(3)), (0, 0, 0), atol=1e-9)
+
+    def test_known_single_axis(self):
+        np.testing.assert_allclose(matrix_to_euler_xyz(euler_xyz_to_matrix(30, 0, 0)),
+                                   (30, 0, 0), atol=1e-9)
+        np.testing.assert_allclose(matrix_to_euler_xyz(euler_xyz_to_matrix(0, -25, 0)),
+                                   (0, -25, 0), atol=1e-9)
+        np.testing.assert_allclose(matrix_to_euler_xyz(euler_xyz_to_matrix(0, 0, 47)),
+                                   (0, 0, 47), atol=1e-9)
+
+    def test_realistic_panel_pose(self):
+        """A MIP unit tilted back and canted inward."""
+        m = euler_xyz_to_matrix(-28.0, 12.0, -3.0)
+        np.testing.assert_allclose(matrix_to_euler_xyz(m), (-28.0, 12.0, -3.0), atol=1e-9)
+
+    def test_gimbal_lock_still_reproduces_the_rotation(self):
+        """
+        At pitch +/-90 the X and Z angles are not separable. The angles returned need not
+        match what went in, but the ROTATION they describe must.
+        """
+        for b in (90.0, -90.0):
+            m = euler_xyz_to_matrix(20.0, b, 35.0)
+            np.testing.assert_allclose(euler_xyz_to_matrix(*matrix_to_euler_xyz(m)), m,
+                                       atol=1e-7)
 
 
 if __name__ == "__main__":

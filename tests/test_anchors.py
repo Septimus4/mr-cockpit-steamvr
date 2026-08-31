@@ -17,6 +17,10 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
+from anchors.place import (
+    fit_plane_frame, fit_rigid, group_by_plate, orient_frame_towards,
+    place_from_markers, place_from_plate, plate_local_points,
+)
 from anchors.solver import (
     average_rotations, constellation_conditioning, is_coplanar, marker_object_points,
     solve_marker_pose, solve_markers,
@@ -28,7 +32,7 @@ from anchors.synthetic import (
     arc_of_head_poses, marker_pose, observe, plate_markers, render_frame,
 )
 from tracing.geometry import Camera, camera_to_world_from_hmd
-from tracing.geometry import euler_xyz_to_matrix, pose_to_matrix
+from tracing.geometry import euler_xyz_to_matrix, matrix_to_euler_xyz, pose_to_matrix
 
 
 def angle_between(a, b):
@@ -518,6 +522,268 @@ class TestCornerRefinement(unittest.TestCase):
         self.assertLess(refined, coarse * 0.7,
                         f"refinement should cut error substantially: "
                         f"{coarse:.2f} mm -> {refined:.2f} mm")
+
+
+class TestPlacement(unittest.TestCase):
+    """
+    Turning solved markers into a cutout pose. This is where anchoring becomes the
+    feature: a cutout that places itself instead of eighteen hand-typed numbers.
+    """
+
+    class _Sol:
+        def __init__(self, p, spread=1.0):
+            self.position = np.asarray(p, float)
+            self.position_spread_mm = spread
+
+    def _plate_solutions(self, origin=(0.0, 1.05, -0.62), euler=(-20.0, 0.0, 0.0),
+                         spread_mm=69.0):
+        markers = plate_markers(origin, euler, spread_mm, [0, 1, 2, 3], 32.8)
+        return {i: self._Sol(m[:3, 3]) for i, m in markers.items()}, markers
+
+    def test_recovers_the_plate_plane(self):
+        sols, markers = self._plate_solutions()
+        got = place_from_markers("panel", sols, [0, 1, 2, 3], viewpoint=(0.0, 1.15, 0.0))
+
+        self.assertIsNotNone(got)
+
+        # centre of the four markers
+        expect = np.mean([m[:3, 3] for m in markers.values()], axis=0)
+        np.testing.assert_allclose(got.position, expect, atol=1e-6)
+
+        self.assertAlmostEqual(got.width, 0.069, delta=0.002)
+        self.assertAlmostEqual(got.height, 0.069, delta=0.002)
+        self.assertLess(got.flatness_mm, 0.01, "a flat plate should fit a plane exactly")
+
+    def test_orientation_matches_the_plate(self):
+        """
+        The recovered rotation must describe the same plane the markers lie in. The Euler
+        angles need not match the fixture's - the in-plane axes are arbitrary - but the
+        NORMAL must.
+        """
+        sols, _ = self._plate_solutions(euler=(-25.0, 15.0, 0.0))
+        got = place_from_markers("panel", sols, [0, 1, 2, 3], viewpoint=(0.0, 1.15, 0.0))
+
+        expect_normal = euler_xyz_to_matrix(-25.0, 15.0, 0.0)[:, 2]
+        got_normal = euler_xyz_to_matrix(*got.euler_deg)[:, 2]
+
+        self.assertGreater(abs(float(got_normal @ expect_normal)), 0.999)
+
+    def test_normal_faces_the_viewer(self):
+        """
+        SVD has no notion of which side is the front, so without this a cutout would face
+        away half the time. The quad is double-sided so it would still draw - the stored
+        rotation would simply be meaningless to read.
+        """
+        sols, _ = self._plate_solutions()
+        viewpoint = np.array([0.0, 1.15, 0.0])
+        got = place_from_markers("panel", sols, [0, 1, 2, 3], viewpoint=viewpoint)
+
+        normal = euler_xyz_to_matrix(*got.euler_deg)[:, 2]
+        self.assertGreater(float(normal @ (viewpoint - got.position)), 0.0)
+
+    def test_margin_extends_the_cutout(self):
+        sols, _ = self._plate_solutions()
+        bare = place_from_markers("p", sols, [0, 1, 2, 3], (0.0, 1.15, 0.0))
+        wide = place_from_markers("p", sols, [0, 1, 2, 3], (0.0, 1.15, 0.0), margin_mm=40.0)
+
+        self.assertAlmostEqual(wide.width - bare.width, 0.040, places=6)
+        np.testing.assert_allclose(wide.position, bare.position, atol=1e-9)
+
+    def test_three_markers_is_enough_two_is_not(self):
+        sols, _ = self._plate_solutions()
+
+        self.assertIsNotNone(place_from_markers("p", sols, [0, 1, 2], (0.0, 1.15, 0.0)))
+        self.assertIsNone(place_from_markers("p", sols, [0, 1], (0.0, 1.15, 0.0)),
+                          "two markers give an arbitrary orientation, not an error")
+
+    def test_flatness_reports_a_bent_plate(self):
+        """A marker knocked off the panel plane should show up as flatness, not silently."""
+        sols, _ = self._plate_solutions()
+        sols[2].position = sols[2].position + np.array([0.0, 0.0, 0.02])
+
+        got = place_from_markers("p", sols, [0, 1, 2, 3], (0.0, 1.15, 0.0))
+        self.assertGreater(got.flatness_mm, 2.0)
+
+    def test_grouping_separates_loose_markers(self):
+        sols = {i: self._Sol((0, 0, 0)) for i in [0, 1, 2, 3, 12, 13]}
+        plates = [{"name": "L", "ids": [0, 1, 2, 3]}]
+
+        grouped, loose = group_by_plate(sols, plates)
+
+        self.assertEqual(grouped, [("L", [0, 1, 2, 3])])
+        self.assertEqual(loose, [12, 13],
+                         "loose stickers anchor the cockpit frame, they are not a panel")
+
+    def test_fit_plane_frame_is_right_handed(self):
+        pts = [(0, 0, 0), (0.07, 0, 0), (0.07, 0.07, 0), (0, 0.07, 0)]
+        _, r, flat = fit_plane_frame(pts)
+
+        np.testing.assert_allclose(r @ r.T, np.eye(3), atol=1e-9)
+        self.assertAlmostEqual(float(np.linalg.det(r)), 1.0, places=9)
+        self.assertLess(flat, 1e-9)
+
+
+PLATE_C = {
+    "name": "winctrl-C",
+    "kind": "display",
+    "usable_mm": {"x": 0.94, "y": 41.25, "w": 118.12, "h": 117.81},
+    "marker_mm": 32.812,
+    "ids": [4, 5, 6, 7],
+    "centres_mm": [[25.346, 65.656], [94.654, 65.656],
+                   [94.654, 134.654], [25.346, 134.654]],
+}
+
+
+class TestPlateFit(unittest.TestCase):
+    """
+    Fitting a cutout to a plate whose layout is KNOWN.
+
+    This is the better path: the size comes from the measured panel, the centre is the
+    panel's centre, and the residual is a real check rather than a self-consistency
+    figure. It is also what runs on William's three WinCtrl panels.
+    """
+
+    class _Sol:
+        def __init__(self, p, spread=1.0):
+            self.position = np.asarray(p, float)
+            self.position_spread_mm = spread
+
+    def _solutions_for(self, pose):
+        """Place plate C at `pose` exactly, as a perfect solve would."""
+        local = plate_local_points(PLATE_C)
+        return {i: self._Sol(pose[:3, :3] @ v + pose[:3, 3]) for i, v in local.items()}
+
+    def test_local_layout_is_centred_and_y_up(self):
+        local = plate_local_points(PLATE_C)
+
+        centre = np.mean(list(local.values()), axis=0)
+        np.testing.assert_allclose(centre, [0, 0, 0], atol=1e-9)
+
+        # Marker 4 is the TOP-left in panel coordinates (y down), so in the cutout frame
+        # it must be ABOVE centre. A sign slip here mirrors the cutout.
+        self.assertGreater(local[4][1], 0.0)
+        self.assertLess(local[4][0], 0.0)
+
+        span = max(v[0] for v in local.values()) - min(v[0] for v in local.values())
+        self.assertAlmostEqual(span, 0.069308, places=5)
+
+    def test_recovers_an_exact_pose(self):
+        pose = pose_to_matrix((0.02, 1.031, -0.588), (-27.4, 3.1, -0.8))
+        got = place_from_plate(PLATE_C, self._solutions_for(pose))
+
+        np.testing.assert_allclose(got.position, pose[:3, 3], atol=1e-9)
+
+        r = euler_xyz_to_matrix(*got.euler_deg)
+        np.testing.assert_allclose(r, pose[:3, :3], atol=1e-7)
+
+        self.assertLess(got.flatness_mm, 1e-6, "an exact layout must fit exactly")
+
+    def test_size_comes_from_the_measured_panel_not_the_markers(self):
+        """
+        The markers span 69 mm; the panel is 118 mm. Sizing from the marker bounding box
+        would produce a cutout barely half the panel.
+        """
+        pose = pose_to_matrix((0.0, 1.0, -0.6), (-20.0, 0.0, 0.0))
+        got = place_from_plate(PLATE_C, self._solutions_for(pose))
+
+        self.assertAlmostEqual(got.width, 0.11812, places=5)
+        self.assertAlmostEqual(got.height, 0.11781, places=5)
+
+    def test_residual_reports_a_bad_solve(self):
+        """
+        A marker solved 1 cm out of place must show up as residual. Without this the
+        cutout would simply be placed slightly wrong, with nothing to say so.
+        """
+        pose = pose_to_matrix((0.0, 1.0, -0.6), (-20.0, 0.0, 0.0))
+        sols = self._solutions_for(pose)
+        sols[6].position = sols[6].position + np.array([0.01, 0.0, 0.0])
+
+        got = place_from_plate(PLATE_C, sols)
+        self.assertGreater(got.flatness_mm, 2.0)
+
+    def test_survives_a_missing_marker(self):
+        """One marker occluded by a hand or a throttle must not lose the panel."""
+        pose = pose_to_matrix((0.1, 0.95, -0.55), (-25.0, 10.0, 2.0))
+        sols = self._solutions_for(pose)
+        del sols[7]
+
+        got = place_from_plate(PLATE_C, sols)
+
+        self.assertEqual(got.marker_ids, [4, 5, 6])
+        np.testing.assert_allclose(got.position, pose[:3, 3], atol=1e-9)
+
+    def test_two_markers_is_not_enough(self):
+        pose = pose_to_matrix((0.0, 1.0, -0.6), (0.0, 0.0, 0.0))
+        sols = self._solutions_for(pose)
+        del sols[6], sols[7]
+
+        self.assertIsNone(place_from_plate(PLATE_C, sols))
+
+    def test_real_plate_files_parse(self):
+        """The shipped plate JSONs must satisfy what place_from_plate needs."""
+        import glob
+        import json
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        paths = glob.glob(os.path.join(root, "PRINT-THESE", "plates", "plate-*.json"))
+
+        display = []
+
+        for path in paths:
+            with open(path) as f:
+                g = json.load(f)
+            if g.get("kind") == "display":
+                display.append(g)
+
+        self.assertTrue(display, "no display plates to check")
+
+        for g in display:
+            local = plate_local_points(g)
+            self.assertEqual(len(local), len(g["ids"]), g["name"])
+            # Half a millimetre, not exact zero: marker centres are placed on PIXELS
+            # (0.156 mm each) and stored rounded, so a perfectly centred layout still
+            # lands a fraction of a pixel off. The check is for a wrong-frame bug, which
+            # would be off by tens of millimetres.
+            np.testing.assert_allclose(np.mean(list(local.values()), axis=0),
+                                       [0, 0, 0], atol=5e-4, err_msg=g["name"])
+
+
+class TestFitRigid(unittest.TestCase):
+
+    def test_recovers_a_known_transform(self):
+        src = np.array([[0.0, 0.0, 0.0], [0.07, 0.0, 0.0],
+                        [0.07, 0.07, 0.0], [0.0, 0.07, 0.0]])
+        r_true = euler_xyz_to_matrix(-31.0, 17.0, 5.0)
+        t_true = np.array([0.2, 1.1, -0.6])
+
+        r, t, rms = fit_rigid(src, src @ r_true.T + t_true)
+
+        np.testing.assert_allclose(r, r_true, atol=1e-9)
+        np.testing.assert_allclose(t, t_true, atol=1e-9)
+        self.assertLess(rms, 1e-12)
+
+    def test_never_returns_a_reflection(self):
+        """A reflection can fit points beautifully and is not a pose."""
+        rng = np.random.default_rng(11)
+
+        for _ in range(50):
+            src = rng.normal(size=(5, 3)) * 0.05
+            dst = rng.normal(size=(5, 3)) * 0.05
+            r, _, _ = fit_rigid(src, dst)
+
+            self.assertAlmostEqual(float(np.linalg.det(r)), 1.0, places=9)
+            np.testing.assert_allclose(r @ r.T, np.eye(3), atol=1e-9)
+
+    def test_does_not_absorb_scale_error(self):
+        """
+        A plate solved 5% too large must show as residual, not be silently swallowed.
+        Scale is measured, so letting it float would hide a range error.
+        """
+        src = np.array([[0.0, 0.0, 0.0], [0.07, 0.0, 0.0],
+                        [0.07, 0.07, 0.0], [0.0, 0.07, 0.0]])
+
+        _, _, rms = fit_rigid(src, src * 1.05)
+        self.assertGreater(rms * 1000.0, 1.0)
 
 
 if __name__ == "__main__":

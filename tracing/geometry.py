@@ -50,6 +50,34 @@ def euler_xyz_to_matrix(rx_deg, ry_deg, rz_deg):
     return rotation_z(rz_deg) @ rotation_y(ry_deg) @ rotation_x(rx_deg)
 
 
+def matrix_to_euler_xyz(r):
+    """
+    3x3 rotation -> intrinsic Euler XYZ in DEGREES, the inverse of euler_xyz_to_matrix.
+
+    This is what turns a solved marker pose back into the RotX/RotY/RotZ the config
+    stores, so it MUST invert the same composition the renderer applies (Rz @ Ry @ Rx).
+    An error here does not fail - it writes a cutout that is rotated, and the user would
+    read that as bad tracking rather than a conversion bug.
+
+    Near gimbal lock (pitch at +/-90 degrees) the X and Z angles are not separable; the
+    convention there is to put the whole rotation into X.
+    """
+    r = np.asarray(r, float).reshape(3, 3)
+
+    sy = -r[2, 0]
+    sy = float(np.clip(sy, -1.0, 1.0))
+    ry = np.arcsin(sy)
+
+    if abs(sy) > 1.0 - 1e-9:                      # gimbal lock
+        rx = np.arctan2(-r[1, 2], r[1, 1])
+        rz = 0.0
+    else:
+        rx = np.arctan2(r[2, 1], r[2, 2])
+        rz = np.arctan2(r[1, 0], r[0, 0])
+
+    return tuple(float(np.degrees(v)) for v in (rx, ry, rz))
+
+
 def pose_to_matrix(position, euler_deg):
     """4x4 local-to-world for a cutout pose."""
     m = np.eye(4)

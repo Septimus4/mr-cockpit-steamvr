@@ -19,6 +19,7 @@ milestones, and the decisions log.
 | [docs/m03-world-quads.md](docs/m03-world-quads.md) | world-anchored quads, DX11 and the menu |
 | [docs/m04-vulkan.md](docs/m04-vulkan.md) | Vulkan parity |
 | [docs/m05-polygon-cutouts.md](docs/m05-polygon-cutouts.md) | arbitrary polygon cutouts |
+| [docs/m07-anchored-placement.md](docs/m07-anchored-placement.md) | solved markers to cutouts in the config |
 
 ## Setup
 
@@ -33,11 +34,24 @@ break the default locations:
 
 ## Tests
 
-    .venv\Scripts\python.exe -m unittest discover -s tests      # 73, no hardware
+    .venv\Scripts\python.exe -m unittest discover -s tests      # 141, no hardware
     cd ..\rectus\src && tests\run_tests.bat                     # 54 checks, C++ mesh
+
+## Calibrating a cockpit
+
+Markers up, sweep, place. No shape tracing, no numbers typed by hand.
+
+    .venv\Scripts\python.exe scripts\show_all_plates.py     # markers on the panels
+    .venv\Scripts\python.exe scripts\solve_anchors.py       # sweep, then it solves
+    .venv\Scripts\python.exe scripts\place_cutouts.py       # shows what it would write
+    .venv\Scripts\python.exe scripts\place_cutouts.py --write
+
+`place_cutouts.py` replays the last capture, so it needs no hardware and can be re-run
+freely. See [docs/m07-anchored-placement.md](docs/m07-anchored-placement.md).
 
 ## Layout
 
+    anchors/        marker detection, pose solving, and cutout placement (unit tested)
     tracing/        geometry, capture and config I/O for the tracing tool (unit tested)
     tests/          the Python suite
     scripts/        the live tools (see below)
@@ -56,6 +70,10 @@ break the default locations:
 | `make_plate.py` | sticker placement guides for panels that are not displays |
 | `show_1to1.py` | display an image at exactly 1:1, DPI-scaling proof |
 | `show_plate.py` | show markers on a USB display panel at a known physical size |
+| `show_all_plates.py` | put markers on every configured display panel at once |
+| `solve_anchors.py` | sweep the cockpit and solve where the markers are |
+| `place_cutouts.py` | turn solved markers into cutouts in the layer's config |
+| `make_chessboard.py` | the camera calibration target |
 | `marker_test.py` | detection rate per marker size |
 | `jitter_test2.py` | pose jitter, single marker vs constellation |
 | `trace_cutout.py` | trace a cutout outline from a camera frame |

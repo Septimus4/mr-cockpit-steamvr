@@ -21,6 +21,11 @@ MAX_POINTS = 32
 # Must equal MAX_PASSTHROUGH_QUADS in shared/config_manager.h.
 MAX_QUADS = 8
 
+# Config_Quad::Name is char[16] and is read with strncpy_s(_TRUNCATE), so 15 characters
+# survive. Truncating here rather than letting the layer do it silently keeps what is
+# written the same as what is read back.
+MAX_NAME = 15
+
 DEFAULT_CONFIG_PATH = os.path.join(
     os.environ.get("APPDATA", ""), "OpenXR SteamVR Passthrough", "config.ini")
 
@@ -164,17 +169,17 @@ def read_quads(path=None):
     return quads
 
 
-def write_points(index, points, path=None):
+def write_keys(values, path=None, section="Quads"):
     """
-    Write one cutout's outline, leaving the rest of the file exactly as it was.
+    Set several keys in one section, leaving every other line exactly as it was.
 
-    Returns the value written. Rewriting only the single line matters because the layer
-    and the settings menu both own this file; a wholesale rewrite would drop anything
-    this tool does not model.
+    Rewriting only the lines that change matters because the layer and the settings menu
+    both own this file: a wholesale rewrite would drop everything this tool does not
+    model. Keys that are absent are appended to the section rather than to the file, or
+    the layer's parser would never reach them.
     """
     path = path or DEFAULT_CONFIG_PATH
-    key = f"Quad{index}_Points"
-    value = format_points(points)
+    pending = dict(values)
 
     with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
         lines = f.readlines()
@@ -185,36 +190,86 @@ def write_points(index, points, path=None):
 
     newline = "\r\n" if lines and lines[0].endswith("\r\n") else "\n"
 
-    in_quads = False
-    quads_start = None
-    quads_end = len(lines)
-    replaced = False
+    in_section = False
+    section_start = None
+    section_end = len(lines)
 
     for i, line in enumerate(lines):
         s = line.strip()
 
         if s.startswith("[") and s.endswith("]"):
-            if in_quads:
-                quads_end = i
+            if in_section:
+                section_end = i
+                in_section = False
                 break
-            in_quads = (s == "[Quads]")
-            if in_quads:
-                quads_start = i
+
+            in_section = (s == f"[{section}]")
+
+            if in_section:
+                section_start = i
+
             continue
 
-        if in_quads and s.startswith(key) and "=" in s and s.split("=")[0].strip() == key:
-            lines[i] = f"{key} = {value}{newline}"
-            replaced = True
-            break
+        if not in_section or "=" not in s:
+            continue
 
-    if not replaced:
-        if quads_start is None:
-            lines.append(f"{newline}[Quads]{newline}")
-            lines.append(f"{key} = {value}{newline}")
-        else:
-            lines.insert(quads_end, f"{key} = {value}{newline}")
+        key = s.split("=")[0].strip()
+
+        if key in pending:
+            lines[i] = f"{key} = {pending.pop(key)}{newline}"
+
+    if pending:
+        # A file whose last line has no newline would otherwise get a key glued onto it.
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            lines[-1] += newline
+
+        if section_start is None:
+            lines.append(f"{newline}[{section}]{newline}")
+            section_end = len(lines)
+
+        for key in list(pending):
+            lines.insert(section_end, f"{key} = {pending.pop(key)}{newline}")
+            section_end += 1
 
     with open(path, "w", encoding="utf-8-sig" if had_bom else "utf-8", newline="") as f:
         f.writelines(lines)
 
+
+def write_points(index, points, path=None):
+    """
+    Write one cutout's outline, leaving the rest of the file exactly as it was.
+
+    Returns the value written.
+    """
+    value = format_points(points)
+    write_keys({f"Quad{index}_Points": value}, path)
+
     return value
+
+
+def write_quad(quad, path=None):
+    """
+    Write one whole cutout - pose, size, name, enabled state and outline.
+
+    This is how a solved anchor becomes a cutout. Every field is written together because
+    a half-written cutout is worse than none: a new pose with a stale size lands in the
+    right place at the wrong scale, which reads as bad tracking rather than a partial
+    write.
+    """
+    i = quad.index
+
+    write_keys({
+        # "true"/"false" rather than 1/0: the parser takes either, but the layer writes
+        # words, and matching it keeps the file from churning every time it saves.
+        f"Quad{i}_Enabled": "true" if quad.enabled else "false",
+        f"Quad{i}_Name": quad.name[:MAX_NAME],
+        f"Quad{i}_PosX": f"{quad.position[0]:.5f}",
+        f"Quad{i}_PosY": f"{quad.position[1]:.5f}",
+        f"Quad{i}_PosZ": f"{quad.position[2]:.5f}",
+        f"Quad{i}_RotX": f"{quad.euler_deg[0]:.3f}",
+        f"Quad{i}_RotY": f"{quad.euler_deg[1]:.3f}",
+        f"Quad{i}_RotZ": f"{quad.euler_deg[2]:.3f}",
+        f"Quad{i}_Width": f"{quad.width:.5f}",
+        f"Quad{i}_Height": f"{quad.height:.5f}",
+        f"Quad{i}_Points": format_points(quad.points),
+    }, path)

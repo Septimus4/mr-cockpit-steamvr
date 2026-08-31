@@ -1,0 +1,225 @@
+"""
+Turning solved markers into cutout poses.
+
+This is the payoff: markers on a panel define where that panel IS, so the cutout can be
+placed there instead of being eighteen numbers typed by hand.
+
+A plate's four markers sit on one rigid surface, so a plane fitted through them IS the
+panel's plane. The cutout inherits that pose, and its size follows from how far apart the
+markers are plus however much panel lies outside them.
+"""
+
+import numpy as np
+
+from tracing.geometry import matrix_to_euler_xyz
+
+
+def fit_plane_frame(points):
+    """
+    A right-handed frame for a set of roughly coplanar points.
+
+    Returns (origin, 3x3 rotation). X and Y span the plane, Z is its normal. The normal
+    comes from the smallest singular value, which is the least-squares best-fit plane -
+    not from any three chosen points, since that would make the result depend on which
+    three.
+    """
+    pts = np.asarray(points, float).reshape(-1, 3)
+    origin = pts.mean(axis=0)
+    centred = pts - origin
+
+    u, s, vt = np.linalg.svd(centred)
+
+    x_axis = vt[0] / np.linalg.norm(vt[0])
+    normal = vt[2] / np.linalg.norm(vt[2])
+    y_axis = np.cross(normal, x_axis)
+    y_axis /= np.linalg.norm(y_axis)
+
+    r = np.column_stack([x_axis, y_axis, normal])
+
+    if np.linalg.det(r) < 0:                 # keep it right-handed
+        r = np.column_stack([x_axis, -y_axis, normal])
+
+    return origin, r, float(s[2])
+
+
+def orient_frame_towards(origin, r, viewpoint):
+    """
+    Flip the frame so its normal faces the viewer, and its Y points up.
+
+    Without this the plane's orientation is arbitrary - SVD has no notion of which side
+    is the front - and a cutout would face away half the time. A quad is double-sided so
+    it would still draw, but its stored rotation would be meaningless to read.
+    """
+    to_viewer = np.asarray(viewpoint, float) - origin
+
+    if r[:, 2] @ to_viewer < 0:
+        r = np.column_stack([r[:, 0], -r[:, 1], -r[:, 2]])
+
+    if r[:, 1][1] < 0:                       # Y axis pointing down in world terms
+        r = np.column_stack([-r[:, 0], -r[:, 1], r[:, 2]])
+
+    return r
+
+
+class CutoutPlacement:
+    """A cutout pose derived from markers, in the form the config stores."""
+
+    def __init__(self, name, position, euler_deg, width, height, marker_ids,
+                 flatness_mm, spread_mm):
+        self.name = name
+        self.position = position
+        self.euler_deg = euler_deg
+        self.width = width
+        self.height = height
+        self.marker_ids = marker_ids
+        self.flatness_mm = flatness_mm
+        self.spread_mm = spread_mm
+
+    def __repr__(self):
+        return (f"{self.name}: {np.round(self.position, 4)} "
+                f"rot {tuple(round(v, 2) for v in self.euler_deg)} "
+                f"{self.width * 1000:.0f} x {self.height * 1000:.0f} mm")
+
+
+def place_from_markers(name, solutions, marker_ids, viewpoint, margin_mm=0.0):
+    """
+    Fit a cutout to a group of solved markers.
+
+    `margin_mm` extends the cutout beyond the markers - a panel usually continues past
+    the markers stuck or drawn on it.
+
+    Returns None if fewer than three markers are available, since a plane needs three and
+    two would give an arbitrary orientation rather than an error.
+    """
+    have = [i for i in marker_ids if i in solutions]
+
+    if len(have) < 3:
+        return None
+
+    pts = np.array([solutions[i].position for i in have])
+    origin, r, flatness = fit_plane_frame(pts)
+    r = orient_frame_towards(origin, r, viewpoint)
+
+    local = (pts - origin) @ r               # marker positions in the plane's own frame
+    width = float(local[:, 0].max() - local[:, 0].min()) + margin_mm / 1000.0
+    height = float(local[:, 1].max() - local[:, 1].min()) + margin_mm / 1000.0
+
+    # Centre the cutout on the markers rather than on their bounding-box corner.
+    centre_local = np.array([(local[:, 0].max() + local[:, 0].min()) / 2.0,
+                             (local[:, 1].max() + local[:, 1].min()) / 2.0, 0.0])
+    position = origin + r @ centre_local
+
+    spread = float(np.mean([solutions[i].position_spread_mm for i in have]))
+
+    return CutoutPlacement(name, position, matrix_to_euler_xyz(r), width, height,
+                           have, flatness * 1000.0, spread)
+
+
+def group_by_plate(solutions, plates):
+    """
+    Group solved markers by the plate they belong to.
+
+    `plates` is a list of dicts with 'name' and 'ids', as the plate JSON files provide.
+    Markers belonging to no plate are returned separately - they are the loose stickers,
+    which anchor the cockpit frame rather than defining a panel.
+    """
+    grouped = []
+    claimed = set()
+
+    for plate in plates:
+        ids = [int(i) for i in plate.get("ids", [])]
+        present = [i for i in ids if i in solutions]
+
+        if present:
+            grouped.append((plate.get("name", "plate"), ids))
+            claimed.update(present)
+
+    loose = sorted(i for i in solutions if i not in claimed)
+    return grouped, loose
+
+
+def plate_local_points(plate):
+    """
+    Where a display plate's markers sit in the CUTOUT's own frame, in metres.
+
+    The plate JSON records each marker centre in panel millimetres, together with the
+    usable rectangle. That makes the layout KNOWN rather than inferred, which is worth a
+    great deal: a known layout can be fitted rigidly, and the leftover residual is then a
+    real measurement of how well the solve agrees with the physical panel.
+
+    Panel coordinates run Y DOWN, like the screen. The cutout frame runs Y up, so Y is
+    flipped here. Getting that wrong does not fail - it mirrors the cutout, which looks
+    like a tracking fault rather than a sign error.
+
+    Returns {marker_id: (x, y, 0)}.
+    """
+    u = plate["usable_mm"]
+    cx = u["x"] + u["w"] / 2.0
+    cy = u["y"] + u["h"] / 2.0
+
+    out = {}
+
+    for marker_id, (mx, my) in zip(plate["ids"], plate["centres_mm"]):
+        out[int(marker_id)] = np.array([(mx - cx) / 1000.0, (cy - my) / 1000.0, 0.0])
+
+    return out
+
+
+def fit_rigid(source, target):
+    """
+    The rotation and translation carrying `source` onto `target` - Kabsch.
+
+    Returns (rotation, translation, rms_error_metres). No scaling is fitted: the plate's
+    size is measured, not a free parameter, so letting scale float would quietly absorb a
+    range error that ought to show up as residual instead.
+    """
+    a = np.asarray(source, float).reshape(-1, 3)
+    b = np.asarray(target, float).reshape(-1, 3)
+
+    ca, cb = a.mean(axis=0), b.mean(axis=0)
+    h = (a - ca).T @ (b - cb)
+
+    u, _, vt = np.linalg.svd(h)
+    r = vt.T @ u.T
+
+    if np.linalg.det(r) < 0:            # a reflection fits points but is not a pose
+        vt[-1] *= -1
+        r = vt.T @ u.T
+
+    t = cb - r @ ca
+    rms = float(np.sqrt(np.mean(np.sum((a @ r.T + t - b) ** 2, axis=1))))
+
+    return r, t, rms
+
+
+def place_from_plate(plate, solutions, margin_mm=0.0):
+    """
+    Fit a cutout to a display plate whose marker layout is known.
+
+    Better than fitting a bare plane through the markers: the size comes from the
+    measured usable rectangle rather than from where the markers happen to fall, the
+    centre is the panel's centre rather than the markers' bounding box, and the residual
+    is a genuine check - it is the disagreement between the solved constellation and the
+    panel's real geometry.
+
+    Returns None if fewer than three of the plate's markers were solved.
+    """
+    local = plate_local_points(plate)
+    have = [i for i in plate["ids"] if int(i) in solutions and int(i) in local]
+
+    if len(have) < 3:
+        return None
+
+    src = np.array([local[int(i)] for i in have])
+    dst = np.array([solutions[int(i)].position for i in have])
+
+    r, t, rms = fit_rigid(src, dst)
+
+    u = plate["usable_mm"]
+    width = u["w"] / 1000.0 + margin_mm / 1000.0
+    height = u["h"] / 1000.0 + margin_mm / 1000.0
+
+    spread = float(np.mean([solutions[int(i)].position_spread_mm for i in have]))
+
+    return CutoutPlacement(plate.get("name", "plate"), t, matrix_to_euler_xyz(r),
+                           width, height, [int(i) for i in have], rms * 1000.0, spread)

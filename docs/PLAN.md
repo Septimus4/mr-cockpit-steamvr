@@ -208,10 +208,12 @@ flowchart LR
     style M03 fill:#2d5016,color:#fff
     style M04 fill:#2d5016,color:#fff
     style M05 fill:#2d5016,color:#fff
+    style M07 fill:#5a5016,color:#fff
 ```
 
-Green is done. M06 is independent of everything shipped so far, which is why it is next:
-nothing already built has to change for it.
+Green is done, amber is partly done. M06's solve and M07's placement are both working in
+Python and covered by tests; what remains for M07 is the runtime path, which is C++ inside
+the layer.
 
 ---
 
@@ -224,8 +226,8 @@ nothing already built has to change for it.
 | M03 | World quads, DX11 — rectangle, manual placement | done, **verified on hardware** |
 | M04 | Vulkan parity | done, **untested on hardware** |
 | M05 | Arbitrary polygon cutouts | done, **verified on hardware** |
-| M06 | Anchor solve from markers | **in progress** — solver + 21 tests |
-| M07 | Anchor-driven pose + dynamic realignment | not started |
+| M06 | Anchor solve from markers | done — **verified on real captures** |
+| M07 | Anchor-driven pose + dynamic realignment | **placement done** — runtime re-solve not started |
 | M08 | Setup UX | not started |
 
 ### M03 — world quads (DX11) — done
@@ -293,7 +295,7 @@ controllers needed.
 
 ### M06 — anchor solve — in progress
 
-`anchors/solver.py` and `anchors/synthetic.py`, with 21 tests. No hardware needed: markers
+`anchors/solver.py` and `anchors/synthetic.py`, with 51 tests. No hardware needed: markers
 at known poses, seen by a virtual camera at known poses, must come back where they started.
 
 **Camera poses are taken as known, not refined.** The headset is Lighthouse-tracked, so
@@ -329,7 +331,7 @@ Remaining:
 - [ ] run it against the real cockpit (needs the camera and markers up)
 - [ ] async at 5-10 Hz on a worker thread, never the render thread — this is C++ in the
       layer, and the one thing that must not be got wrong
-- [ ] write solved poses into the config so cutouts ride them (M07)
+- [x] write solved poses into the config so cutouts ride them (M07)
 
 - see [anchoring-config.md](anchoring-config.md)
 
@@ -349,7 +351,7 @@ upstream PR could not contain any of it. Where each piece ends up:
 means debugging the algorithm and the port at the same time, in the harder language, with
 a rebuild-and-restart cycle instead of a 0.3 second test run.
 
-The 104 tests are not throwaway - they are the SPECIFICATION. Once the C++ exists those
+The 141 tests are not throwaway - they are the SPECIFICATION. Once the C++ exists those
 cases become its acceptance criteria, and `render_frame` can generate fixtures for both.
 
 ### First real anchor solve, 2026-08-31 — what it found
@@ -415,13 +417,43 @@ and grows with sample count, so it reported 65 mm for a marker whose real scatte
 
 None of this would have come from the synthetic tests, which build observations with a
 perfect camera model and no time skew. Running against the real cockpit before porting was
-worth more than the 110 tests for finding it.
+worth more than the 141 tests for finding it.
 
-### M07 — anchor-driven pose
+### M07 — anchor-driven pose — placement done
 
-- express each cutout's pose relative to its anchor constellation
-- re-solve periodically, low-pass filtered, to correct drift and headset shift
-- fall back to last-known pose when markers are not visible
+Solved markers now become cutouts. `anchors/place.py` fits a plate's KNOWN marker layout
+onto its solved positions rigidly (Kabsch), and `scripts/place_cutouts.py` writes the
+result into the layer's config.
+
+Fitting a known layout rather than a bare plane matters: the size comes from the measured
+panel (118 mm) rather than the markers' bounding box (69 mm), the centre is the panel's
+centre, and the leftover residual is a genuine disagreement with real geometry rather than
+a self-consistency figure. Scale is deliberately not fitted, so a range error shows up
+instead of being absorbed.
+
+Measured on the 2026-08-31 capture: residuals of **1.2 / 3.3 / 6.0 mm** for plates C, L
+and R, against the ~20 mm budget. The worst is the plate whose markers were only ever seen
+square-on — the planar ambiguity, reported rather than hidden.
+
+Done:
+
+- [x] `matrix_to_euler_xyz` — exact inverse of the config's Euler convention
+- [x] `fit_rigid` — Kabsch, reflection-guarded, no scale freedom
+- [x] `place_from_plate` — known layout, measured size, residual as the confidence signal
+- [x] `place_from_markers` — plane fit for loose stickers with no recorded layout
+- [x] `write_keys` / `write_quad` — line-level config edits that cannot relocate keys out
+      of `[Quads]`, where the layer would never read them
+- [x] `scripts/place_cutouts.py` — replays a capture, dry run by default
+
+Remaining:
+
+- [ ] verify in the headset that a placed cutout lands on its physical panel — the last
+      unproven link in the whole chain
+- [ ] express each cutout's pose relative to its anchor constellation
+- [ ] re-solve periodically, low-pass filtered, to correct drift and headset shift
+- [ ] fall back to last-known pose when markers are not visible
+
+- see [m07-anchored-placement.md](m07-anchored-placement.md)
 
 ### M08 — setup UX
 
@@ -502,16 +534,21 @@ Nothing else should be built on top of an unverified renderer.
 - [ ] **Note whether DCS and X-Plane submit depth.** The menu reports it per client. It
       decides whether occlusion works, and it is a five-minute check.
 
-### 2. M06 — anchor solve
+### 2. M06/M07 — solve and placement
 
-The next build milestone, and deliberately chosen: it depends on nothing already shipped,
-so it can proceed even if verification turns up renderer problems.
+The Python side is done and measured. What is left is one hardware check and then the port.
 
-- [ ] marker detection on a captured frame, reusing the tested `Camera`/`Plane` geometry
-- [ ] bundle adjustment over multiple viewpoints; scale fixed by the id -> size map
-- [ ] the conditioning check from anchoring-config.md (PCA aspect, refuse above 3:1)
-- [ ] **async by construction** - 5-10 Hz on a worker thread, never the render thread
-- [ ] unit tests on synthetic marker observations, in the same style as the tracing suite
+- [x] ~~marker detection, solving, conditioning, synthetic tests~~ DONE — see M06
+- [x] ~~write solved poses into the config~~ DONE — see M07
+- [ ] **THE ONE THING WORTH DOING FIRST.** Put the markers up, run
+      `place_cutouts.py --write`, and look. Every link in the chain is now tested
+      *except* whether an anchored cutout actually lands on its physical panel. If it is
+      off, the camera offset is the first suspect: it is the only number in the chain
+      measured with a ruler rather than solved.
+- [ ] **async by construction** - 5-10 Hz on a worker thread, never the render thread.
+      This is C++ in the layer and is the one thing that must not be got wrong.
+- [ ] port detection + solve + placement to C++; the 141 Python tests are the acceptance
+      criteria
 
 ### 3. Not blocking, pick up when convenient
 
@@ -526,6 +563,9 @@ so it can proceed even if verification turns up renderer problems.
       Every number in marker-size-measurements.md was taken on an emissive screen and that
       gap is still unquantified; the 50 mm is the control, separating a material shortfall
       from a size one.
+- [ ] Rename the `winctrl-R` plate. The solve puts it 20 cm BELOW the other two, not to
+      the right, and puts `winctrl-L` to the RIGHT of `winctrl-C`. The names were guessed
+      before anything was measured.
 - [ ] Masked and AlphaTest prepasses are still not cutout-aware on either backend
 - [ ] `passthrough_renderer_dx11.cpp:2183` upstream oddity, noted below
 
