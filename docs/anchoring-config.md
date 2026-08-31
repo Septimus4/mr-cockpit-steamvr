@@ -167,9 +167,14 @@ geometry is fixed by construction:
 Template placement need not be exact; bundle adjustment refines from it. The template
 supplies a good initial estimate, not a tolerance requirement.
 
-Shipped (STICKER plates; for USB DISPLAY panels see section 8): `PRINT-THESE/plates/plate-winctrl-{1,2,3}.pdf` for 117 x 149 mm USB panels
-(WinCtrl and similar), 4 x 30 mm stickers per plate, 75 x 107 mm spread, 1.43:1.
-Generate others with `--w --h --ids`.
+Shipped: `PRINT-THESE/plates/plate-sticker-117x149-{1,2,3}.pdf` for 117 x 149 mm panels,
+4 x 30 mm stickers per plate, 75 x 107 mm spread, 1.43:1. Generate other sizes with
+`--w --h --ids`.
+
+These are for panels that are NOT displays. Where a panel IS a display it should show its
+markers instead (section 8) - bigger markers, better conditioning, and no adhesive on the
+hardware. The two kinds are ALTERNATIVES for a given panel and both start at id 0, so
+mixing them across panels needs distinct `--ids` ranges.
 
 ### Tier 3 - mixed
 
