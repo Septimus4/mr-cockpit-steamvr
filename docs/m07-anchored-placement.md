@@ -97,6 +97,27 @@ square-on — the planar ambiguity, reported rather than hidden.
 "C" at −0.16 m) and "R" 20 cm *below*. The names were a guess made before anything was
 measured; the solve is what is true.
 
+## The marker-derived size is a STARTING POINT, not the answer
+
+The cutouts exist so the pilot can reach the **physical buttons around the MFDs and the
+centre console**. They are not for seeing the MFD screens - the sim renders that content
+in-game, and passthrough of a real display looks worse than the in-game version.
+
+So `place_from_plate` sizes the cutout to the panel's *usable display area*
+(118.1 x 117.8 mm) because that is what the markers can measure, and that is deliberately
+**smaller than what is wanted**. Growing it is expected:
+
+- `--margin MM` grows every cutout symmetrically at placement time
+- the Quads tab's Width and Height sliders do it live in the headset, in 5 mm steps,
+  which is the faster way to find the right extent the first time
+
+Accuracy expectations follow from this. Reaching a button tolerates far more error than
+aligning to a screen edge would, so the 1.2-6.0 mm residuals measured here are ample.
+
+The **centre console has no markers on it at all**. It needs either its own stickers, or a
+pose expressed relative to the solved panel anchors so it rides them - the latter is the
+remaining half of M07.
+
 ## Usage
 
 ```bash

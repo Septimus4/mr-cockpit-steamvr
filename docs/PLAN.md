@@ -419,6 +419,20 @@ None of this would have come from the synthetic tests, which build observations 
 perfect camera model and no time skew. Running against the real cockpit before porting was
 worth more than the 141 tests for finding it.
 
+### The cutouts are for the BUTTONS, not the screens
+
+Stated 2026-08-31: the point is to see the **physical buttons around the MFDs and the
+centre console**, not the MFD screens themselves. The sim draws the screen content, and
+passthrough of a real display is worse than the in-game version.
+
+This reframes accuracy. Marker-derived sizes come out at the panel's *display* area, which
+is smaller than wanted by design - the cutout has to reach past the bezel to the buttons.
+Growing it is expected, and reaching a button tolerates much more error than aligning to a
+screen edge, so the residuals measured in M07 are ample rather than marginal.
+
+It also puts the centre console on the critical path: it carries no markers, so it needs
+stickers or a pose expressed in the solved anchor frame.
+
 ### M07 — anchor-driven pose — placement done
 
 Solved markers now become cutouts. `anchors/place.py` fits a plate's KNOWN marker layout
@@ -449,6 +463,9 @@ Remaining:
 
 - [ ] verify in the headset that a placed cutout lands on its physical panel — the last
       unproven link in the whole chain
+- [ ] grow the cutouts to cover the surrounding BUTTONS, which is the actual goal; the
+      Width/Height sliders do it live in 5 mm steps
+- [ ] the centre console: stickers, or a pose in the solved anchor frame
 - [ ] express each cutout's pose relative to its anchor constellation
 - [ ] re-solve periodically, low-pass filtered, to correct drift and headset shift
 - [ ] fall back to last-known pose when markers are not visible
