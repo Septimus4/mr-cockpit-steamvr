@@ -199,6 +199,37 @@ tilt buys little deviation. At 0.38 m with the 15 cm camera-eye baseline that co
 
 Fine for reaching buttons. Per-panel cutouts stay tighter if the edges need to line up.
 
+## When the whole pit looks too small AND too far
+
+That is ONE error, not two. A cutout of fixed physical size placed too far away subtends a
+smaller angle, so "smaller" and "further" are the same observation.
+
+Range is inferred from apparent size:
+
+    range = focal_length * marker_size / apparent_pixels
+
+so the directions to the markers are well measured and only the RANGE is in doubt. It
+depends on two numbers that could be wrong: the assumed marker size, and the focal length.
+
+`--range-scale K` applies the correction where it physically belongs - on the assumed
+marker size - so every direction is untouched and only depth moves. Measured on the real
+capture, mean marker range is 0.425 m; `--range-scale 0.90` brings it to 0.383 m.
+
+**Nudging `PosZ` is the trap.** World Z is not the direction from the eye to a panel, so
+moving along it drags the cutout sideways off the panel while appearing to fix the depth -
+which is exactly the "helped, but messed up all the rest" failure.
+
+Once a value looks right, it is not a fudge to keep: `K` says the markers are `(1-K)`
+smaller than declared, which belongs in the plate JSON's `marker_mm`.
+
+## Starting over
+
+    python scripts/place_cutouts.py --reset
+
+Disables and clears every cutout. Configs accumulate: cutouts get hand-tuned, overwritten
+by the menu, and re-placed by this tool, so a stale ENABLED quad from an old attempt looks
+exactly like the new placement being wrong.
+
 ## Usage
 
 ```bash
@@ -217,6 +248,8 @@ Replays the last capture — no camera, no headset — and prints what it would 
 | `--shaped` | one cutout whose OUTLINE follows the panels — a T, not a box |
 | `--exclude-screens` | cut the MFD screens out, so the SIM draws them |
 | `--screen-shrink MM` | pull each screen hole in, default 3 mm |
+| `--range-scale K` | scale solved range; below 1 pulls the pit closer |
+| `--reset` | disable and clear every cutout, then stop |
 | `--config PATH` | write somewhere else — useful for testing |
 
 Sweep once with `scripts/solve_anchors.py`, then place as many times as you like.

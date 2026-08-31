@@ -37,7 +37,7 @@ from anchors.place import (
     cover_all, flattening_cost_mm, place_from_markers, place_from_plate,
     shaped_cutout,
 )
-from anchors.solver import solve_markers
+from anchors.solver import Observation, solve_markers
 from tracing.config_io import (
     DEFAULT_CONFIG_PATH, MAX_POINTS, MAX_QUADS, QuadConfig, read_quads, write_quad,
 )
@@ -89,6 +89,46 @@ def _polygon_area(points):
 
     return abs(sum(points[i][0] * points[(i + 1) % n][1] -
                    points[(i + 1) % n][0] * points[i][1] for i in range(n))) / 2.0
+
+
+def reset_quads(config_path, force):
+    """
+    Put every cutout back to disabled and empty.
+
+    A clean slate matters more than it sounds. Cutouts are hand-tuned, overwritten by the
+    menu, and re-placed by this tool, so a config can end up a mixture of three different
+    attempts - and a stale ENABLED quad from an old attempt looks exactly like the new
+    placement being wrong.
+    """
+    import shutil
+
+    if not os.path.exists(config_path):
+        print(f"  No config at {config_path}")
+        return 1
+
+    running = menu_is_running()
+
+    if running and not force:
+        print(f"  REFUSING: {MENU_PROCESS} is running and would write its copy back over")
+        print("  this. Close it, run again, then reopen it.")
+        return 1
+
+    backup = config_path + ".bak"
+    shutil.copy2(config_path, backup)
+
+    existing = read_quads(config_path)
+    had = [q.label for q in existing if q.enabled]
+
+    for i in range(MAX_QUADS):
+        write_quad(QuadConfig(i), config_path)
+
+    print(f"  {MAX_QUADS} cutouts cleared" + (f" (was: {', '.join(had)})" if had else ""))
+    print(f"  Previous config kept at {backup}")
+    print()
+    print("  Place them again with:")
+    print("    python scripts/place_cutouts.py --exclude-screens --write")
+
+    return 0
 
 
 def load_display_plates():
@@ -222,6 +262,13 @@ def main():
                     help="grow every cutout by this many mm on all sides")
     ap.add_argument("--start", type=int, default=0,
                     help="first quad index to use, so earlier ones are left alone")
+    ap.add_argument("--reset", action="store_true",
+                    help="disable and clear EVERY cutout, then stop. Use when the config "
+                         "has been hand-edited into a state you no longer trust.")
+    ap.add_argument("--range-scale", type=float, default=1.0, metavar="K",
+                    help="scale every solved RANGE by K. Below 1 pulls the pit closer. "
+                         "Use when the cutouts look both too small and too far away - "
+                         "that is one error, not two.")
     ap.add_argument("--exclude-screens", action="store_true",
                     help="cut each MFD screen out of the outline, so the SIM draws the "
                          "display and passthrough covers only the buttons. Implies "
@@ -240,6 +287,9 @@ def main():
                          "this is the only way to reach it today.")
     a = ap.parse_args()
 
+    if a.reset:
+        return reset_quads(a.config, a.force)
+
     if not os.path.exists(a.capture):
         print(f"  No capture at {a.capture}")
         print("  Sweep the cockpit first:  python scripts/solve_anchors.py")
@@ -255,6 +305,18 @@ def main():
     if np.any(delta):
         print(f"  capture predates the current camera calibration; shifting cameras by "
               f"{np.round(delta * 1000, 1)} mm")
+
+    if a.range_scale != 1.0:
+        # Range is inferred from a marker's APPARENT size: range = focal * size / pixels.
+        # So scaling range IS scaling the assumed marker size - applying it there rather
+        # than shifting the result keeps every direction untouched and only moves depth,
+        # which is the whole point. Nudging PosZ instead rotates the cutout off its panel,
+        # because world Z is not the direction from the eye to the panel.
+        observations = [Observation(o.marker_id, o.corners_px, o.camera_to_world,
+                                    o.size_mm * a.range_scale, o.frame)
+                        for o in observations]
+        print(f"  range scaled by {a.range_scale:.3f} - equivalent to every marker being "
+              f"{(1 - a.range_scale) * 100:.1f}% smaller than declared")
 
     solutions = solve_markers(observations, cameras)
     plates = load_display_plates()

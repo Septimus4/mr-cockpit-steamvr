@@ -28,8 +28,8 @@ from anchors.place import (
     shaped_cutout,
 )
 from anchors.solver import (
-    average_rotations, constellation_conditioning, is_coplanar, marker_object_points,
-    solve_marker_pose, solve_markers,
+    Observation, average_rotations, constellation_conditioning, is_coplanar,
+    marker_object_points, solve_marker_pose, solve_markers,
 )
 from anchors.detect import (
     detect_markers, is_diagnostic_id, make_detector, plate_size_overrides, summarise,
@@ -1486,6 +1486,72 @@ class TestRealCockpitOutline(unittest.TestCase):
         for (sx, sy), (x, y) in zip(pairs, got.points):
             self.assertAlmostEqual(float(sx), x, places=5)
             self.assertAlmostEqual(float(sy), y, places=5)
+
+
+class TestRangeScale(unittest.TestCase):
+    """
+    Scaling range by scaling the assumed marker size.
+
+    A cutout that looks BOTH too small and too far away is one error, not two: a fixed
+    physical size placed too far subtends a smaller angle. Range comes from apparent size
+    (range = focal * size / pixels), so the correction belongs on the size, where it moves
+    depth and leaves every direction alone.
+
+    Nudging PosZ instead is the trap - world Z is not the direction from the eye to a
+    panel, so it drags the cutout off the panel while appearing to help.
+    """
+
+    def _observations(self, size_mm=32.812):
+        from anchors.synthetic import arc_of_head_poses, observe, plate_markers
+
+        markers = plate_markers((0.0, 1.0, -0.6), (-20.0, 0.0, 0.0), 69.0, [0, 1, 2, 3],
+                                size_mm)
+        heads = arc_of_head_poses((0.0, 1.0, -0.6), 0.5, 5)
+
+        return observe(markers, heads, {i: size_mm for i in markers})
+
+    def test_scaling_size_scales_range_proportionally(self):
+        obs, cams = self._observations()
+        base = solve_markers(obs, cams)
+
+        scaled_obs = [Observation(o.marker_id, o.corners_px, o.camera_to_world,
+                                  o.size_mm * 0.9, o.frame) for o in obs]
+        scaled = solve_markers(scaled_obs, cams)
+
+        eye = np.array([c.camera_to_world[:3, 3] for c in cams.values()]).mean(axis=0)
+
+        for marker_id in base:
+            r0 = np.linalg.norm(base[marker_id].position - eye)
+            r1 = np.linalg.norm(scaled[marker_id].position - eye)
+            self.assertAlmostEqual(r1 / r0, 0.9, delta=0.02)
+
+    def test_scaling_preserves_direction(self):
+        """The angles are the well-measured part. Only depth may move."""
+        obs, cams = self._observations()
+        base = solve_markers(obs, cams)
+
+        scaled_obs = [Observation(o.marker_id, o.corners_px, o.camera_to_world,
+                                  o.size_mm * 0.85, o.frame) for o in obs]
+        scaled = solve_markers(scaled_obs, cams)
+
+        eye = np.array([c.camera_to_world[:3, 3] for c in cams.values()]).mean(axis=0)
+
+        for marker_id in base:
+            a = base[marker_id].position - eye
+            b = scaled[marker_id].position - eye
+            cos = float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
+            self.assertGreater(cos, 0.9995, "direction to the marker must not move")
+
+    def test_a_scale_of_one_changes_nothing(self):
+        obs, cams = self._observations()
+        base = solve_markers(obs, cams)
+
+        same = solve_markers([Observation(o.marker_id, o.corners_px, o.camera_to_world,
+                                          o.size_mm * 1.0, o.frame) for o in obs], cams)
+
+        for marker_id in base:
+            np.testing.assert_allclose(same[marker_id].position,
+                                       base[marker_id].position, atol=1e-12)
 
 
 if __name__ == "__main__":

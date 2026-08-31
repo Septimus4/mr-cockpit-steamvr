@@ -9,7 +9,7 @@ a headset on is slow enough that it would not get done.
     cd mr-cockpit-steamvr
     .venv\Scripts\python.exe -m unittest discover -s tests
 
-185 tests, ~1.0 s.
+188 tests, ~1.1 s.
 
 | file | area |
 |------|------|
