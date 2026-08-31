@@ -179,19 +179,39 @@ def build():
         cx0, cy0 = ux0 + off, uy0 + off
     CTR = [(cx0, cy0), (cx0 + sw, cy0), (cx0 + sw, cy0 + sh), (cx0, cy0 + sh)][:len(IDS)]
 
-    page = np.full((mon["h"], mon["w"]), ST["bg"], np.uint8)
-    cv2.rectangle(page, (px(ux0), px(uy0)), (px(ux0 + uw) - 1, px(uy0 + uh) - 1), 160, 1)
+    page = np.full((mon["h"], mon["w"], 3), ST["bg"], np.uint8)
+
+    # The usable region, drawn boldly. At 1 px in pale grey it was all but invisible, so
+    # moving an edge produced no feedback and looked like the control was dead.
+    x0, y0i = px(ux0), px(uy0)
+    x1, y1i = px(ux0 + uw) - 1, px(uy0 + uh) - 1
+    EDGE = (60, 120, 200)          # RGB, blue
+    ACTIVE = (220, 40, 40)         # RGB, red - the edge the arrows will move
+    sel = EDGES[ST["edge"]]
+
+    def edge_colour(name):
+        return ACTIVE if (sel == name or sel == "ALL") else EDGE
+
+    def edge_width(name):
+        return 6 if (sel == name or sel == "ALL") else 2
+
+    cv2.line(page, (x0, y0i), (x1, y0i), edge_colour("top"), edge_width("top"))
+    cv2.line(page, (x0, y1i), (x1, y1i), edge_colour("bottom"), edge_width("bottom"))
+    cv2.line(page, (x0, y0i), (x0, y1i), edge_colour("left"), edge_width("left"))
+    cv2.line(page, (x1, y0i), (x1, y1i), edge_colour("right"), edge_width("right"))
+
     for mid, (cx, cy) in zip(IDS, CTR):
         x, y = px(cx) - mkpx // 2, px(cy) - mkpx // 2
         x = max(0, min(x, mon["w"] - mkpx))
         y = max(0, min(y, mon["h"] - mkpx))
-        page[y:y + mkpx, x:x + mkpx] = cv2.aruco.generateImageMarker(d, mid, mkpx, borderBits=1)
+        marker = cv2.aruco.generateImageMarker(d, mid, mkpx, borderBits=1)
+        page[y:y + mkpx, x:x + mkpx] = marker[:, :, None]
 
     P = np.array(CTR) - np.array(CTR).mean(0)
     sv = np.linalg.svd(P, compute_uv=False)
     asp = sv[0] / max(sv[1], 1e-9)
     verdict = "GOOD" if asp < 2 else ("MARGINAL" if asp < 3 else "TOO COLLINEAR")
-    _, fids, _ = det.detectMarkers(page)
+    _, fids, _ = det.detectMarkers(cv2.cvtColor(page, cv2.COLOR_RGB2GRAY))
     n = 0 if fids is None else len(fids)
 
     txt = [f"edge: {EDGES[ST['edge']]}",
@@ -216,10 +236,10 @@ def build():
             y0 = band_top + (band_bot - band_top - block) / 2.0
             for i, t in enumerate(txt):
                 cv2.putText(page, t, (px(ux0 + 2), px(y0 + line_mm * (i + 0.75))),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.40, 60, 1)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.40, (60, 60, 60), 1)
         else:
             cv2.putText(page, "h for info", (px(ux0 + 2), px((band_top + band_bot) / 2)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.40, 60, 1)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.40, (60, 60, 60), 1)
 
     geom = dict(name=a.name or f"panel{a.monitor}", kind="display", monitor=a.monitor,
                 panel_px=[mon["w"], mon["h"]],
@@ -233,7 +253,7 @@ def build():
                 centres_mm=[[round(c, 3) for c in p] for p in CTR],
                 aspect=round(float(asp), 3), verdict=verdict,
                 self_detect=f"{n}/{len(IDS)}")
-    return page, geom, " | ".join(txt[1:4])
+    return page, geom, " | ".join(txt[1:5])
 
 
 if a.dry_run:
