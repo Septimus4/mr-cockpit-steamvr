@@ -50,5 +50,12 @@
   ],
   "aspect": 1.004,
   "verdict": "GOOD",
-  "self_detect": "4/4"
+  "self_detect": "4/4",
+  "unit_mm": {
+    "w": 167.0,
+    "h": 185.0,
+    "dx": 0.0,
+    "dy": 0.0,
+    "source": "manufacturer drawing, screen aperture assumed centred"
+  }
 }

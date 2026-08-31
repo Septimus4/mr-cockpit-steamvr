@@ -32,7 +32,9 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from anchors.place import place_from_markers, place_from_plate
+from anchors.place import (
+    cover_all, flattening_cost_mm, place_from_markers, place_from_plate,
+)
 from anchors.solver import solve_markers
 from tracing.config_io import MAX_QUADS, DEFAULT_CONFIG_PATH, QuadConfig, read_quads, write_quad
 
@@ -123,7 +125,12 @@ def where_to_look(placement, head):
             f"{abs(yaw):.0f} deg {'right' if yaw > 0 else 'left'}")
 
 
-def describe(placed, loose, solutions, head=None):
+def describe(placed, loose, solutions, head=None, single=False):
+    """
+    `single` says the placements came from --cover-all, where flatness_mm means the
+    markers' spread about a COMMON plane rather than one panel's fit residual. Reporting
+    the two the same way would turn an expected and already-priced cost into a fault.
+    """
     for c in placed:
         p = c.position
         print(f"\n  {c.name}")
@@ -132,13 +139,14 @@ def describe(placed, loose, solutions, head=None):
               f"{c.euler_deg[2]:+.2f}  deg")
         print(f"    size      {c.width * 1000:.1f} x {c.height * 1000:.1f} mm")
         print(f"    markers   {c.marker_ids}")
-        print(f"    fit       {c.flatness_mm:.1f} mm residual, "
+        print(f"    fit       {c.flatness_mm:.1f} mm "
+              f"{'out of a common plane' if single else 'residual'}, "
               f"{c.spread_mm:.1f} mm mean per-view spread")
 
         if head is not None:
             print(f"    from you  {where_to_look(c, head)}")
 
-        if c.flatness_mm > RESIDUAL_WARN_MM:
+        if not single and c.flatness_mm > RESIDUAL_WARN_MM:
             print(f"    ^ the solved markers disagree with this panel's measured geometry")
             print(f"      by {c.flatness_mm:.0f} mm. Either a marker moved, or the panel was")
             print(f"      measured wrong. Placing it will land the cutout visibly off.")
@@ -167,6 +175,11 @@ def main():
                     help="grow every cutout by this many mm on all sides")
     ap.add_argument("--start", type=int, default=0,
                     help="first quad index to use, so earlier ones are left alone")
+    ap.add_argument("--cover-all", nargs="?", const="530x430", default=None,
+                    metavar="WxH",
+                    help="ONE cutout over the whole assembly instead of one per panel, "
+                         "in mm (default 530x430). The console carries no markers, so "
+                         "this is the only way to reach it today.")
     a = ap.parse_args()
 
     if not os.path.exists(a.capture):
@@ -186,21 +199,54 @@ def main():
 
     placed, loose = placements(solutions, plates, a.margin)
 
+    if a.cover_all:
+        try:
+            w_mm, h_mm = (float(v) for v in a.cover_all.lower().split("x"))
+        except ValueError:
+            print(f"  --cover-all wants WxH in mm, for example 530x430, not {a.cover_all!r}")
+            return 1
+
+        head_now = head_frame(cameras)
+        viewpoint = head_now[0] if head_now else np.array([0.0, 1.2, 0.0])
+        single = cover_all(placed, solutions, w_mm + a.margin, h_mm + a.margin, viewpoint)
+
+        if single is None:
+            print("\n  Not enough solved markers to fit a common plane.")
+            return 1
+
+        distance = float(np.linalg.norm(single.position - viewpoint)) if head_now else 0.45
+        cost = flattening_cost_mm(single.flatness_mm, distance)
+
+        print(f"\n  Covering all {len(placed)} panels with ONE cutout.")
+        print(f"  The markers sit within {single.flatness_mm:.0f} mm of a common plane over")
+        print(f"  their {w_mm:.0f} x {h_mm:.0f} mm span, which at {distance:.2f} m costs about "
+              f"{cost:.0f} mm of")
+        print("  sideways misalignment where the surfaces bow away from it. Fine for")
+        print("  reaching buttons; per-panel cutouts are tighter if you want the edges to")
+        print("  line up.")
+
+        placed = [single]
+        loose = []
+
     if not placed:
         print("\n  No panel had three solved markers, so nothing can be placed.")
         print("  Put the markers up (python scripts/show_all_plates.py) and sweep again.")
         return 1
 
     head = head_frame(cameras)
-    describe(placed, loose, solutions, head)
+    describe(placed, loose, solutions, head, single=bool(a.cover_all))
 
     if head is not None:
         total = sum(c.width * c.height for c in placed) * 1e4
         print(f"\n  Together these cutouts are {total:.0f} square cm of passthrough, and")
-        print("  they are the ONLY passthrough if QuadsExclusive is on. That is a small")
-        print("  target: looking straight ahead you will see nothing at all. Look where")
-        print("  the lines above say, or run with --margin 200 once to make them big")
-        print("  enough to find, then place again without it.")
+        print("  they are the ONLY passthrough if QuadsExclusive is on.")
+
+        # Below roughly a hand's span, a cutout is easy to miss entirely - which is what
+        # happened on the first real placement, and reads as the feature being broken.
+        if total < 600.0:
+            print("  That is a small target: looking straight ahead you will see nothing")
+            print("  at all. Look where the lines above say, or run --cover-all once to")
+            print("  put one big hole over the whole assembly and find it that way.")
 
     if a.start + len(placed) > MAX_QUADS:
         print(f"\n  {len(placed)} cutouts from index {a.start} would exceed the layer's "

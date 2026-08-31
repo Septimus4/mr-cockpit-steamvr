@@ -103,20 +103,42 @@ The cutouts exist so the pilot can reach the **physical buttons around the MFDs 
 centre console**. They are not for seeing the MFD screens - the sim renders that content
 in-game, and passthrough of a real display looks worse than the in-game version.
 
-So `place_from_plate` sizes the cutout to the panel's *usable display area*
-(118.1 x 117.8 mm) because that is what the markers can measure, and that is deliberately
-**smaller than what is wanted**. Growing it is expected:
+The markers can only ever measure the SCREEN, because that is what draws them. The
+`unit_mm` block in each plate JSON carries the real extent:
 
-- `--margin MM` grows every cutout symmetrically at placement time
-- the Quads tab's Width and Height sliders do it live in the headset, in 5 mm steps,
-  which is the faster way to find the right extent the first time
+| | screen | WinCtrl MFD unit |
+|---|---|---|
+| size | 118.1 x 117.8 mm | **167 x 185 mm** |
+| area | 139 cm2 | **309 cm2** |
 
-Accuracy expectations follow from this. Reaching a button tolerates far more error than
-aligning to a screen edge would, so the 1.2-6.0 mm residuals measured here are ample.
+Sizing to the screen would miss more than half the unit — and the missing half is entirely
+buttons. `cutout_extent` reads `unit_mm` and falls back to the screen only when a plate
+does not declare one. `dx`/`dy` handle a screen aperture that is not centred in its
+housing; the offset is applied **in the cutout's own plane**, since applying it in world
+axes would slide the cutout off any tilted panel, which every cockpit panel is.
 
-The **centre console has no markers on it at all**. It needs either its own stickers, or a
-pose expressed relative to the solved panel anchors so it rides them - the latter is the
-remaining half of M07.
+`--margin MM` still stacks on top, and the Quads tab's Width/Height sliders adjust it live
+in 5 mm steps.
+
+Accuracy expectations follow from this too. Reaching a button tolerates far more error
+than aligning to a screen edge would, so the 1.2-6.0 mm residuals measured here are ample.
+
+### The centre console has no markers at all
+
+`--cover-all` puts ONE cutout over the whole assembly (530 x 430 mm by default), on the
+best-fit plane through every solved marker. Until stickers go on the console, this is the
+only way to reach it — and it is much the quickest way to find out whether anchoring works
+at all, because 2279 cm2 is impossible to miss.
+
+The cost is flattening. Measured on the real capture, the twelve markers sit within
+**24 mm** of a common plane across a 441 x 280 mm spread — far flatter than the panels'
+tilts (-10.9, -7.8, -26.4 degrees) suggest, because each panel is small enough that its
+tilt buys little deviation. At 0.38 m with the 15 cm camera-eye baseline that costs about
+**15 mm** of sideways misalignment where the surfaces bow away from the plane:
+
+    shift = baseline x deviation / distance^2
+
+Fine for reaching buttons. Per-panel cutouts stay tighter if the edges need to line up.
 
 ## Usage
 
@@ -132,6 +154,7 @@ Replays the last capture — no camera, no headset — and prints what it would 
 | `--capture PATH` | replay a different capture |
 | `--margin MM` | grow every cutout by MM on all sides |
 | `--start N` | first quad index, so earlier cutouts are left alone |
+| `--cover-all [WxH]` | one cutout over the whole assembly, mm, default `530x430` |
 | `--config PATH` | write somewhere else — useful for testing |
 
 Sweep once with `scripts/solve_anchors.py`, then place as many times as you like.

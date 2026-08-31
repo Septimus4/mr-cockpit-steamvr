@@ -18,8 +18,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
 from anchors.place import (
-    fit_plane_frame, fit_rigid, group_by_plate, orient_frame_towards,
-    place_from_markers, place_from_plate, plate_local_points,
+    cover_all, cutout_extent, fit_plane_frame, fit_rigid, flattening_cost_mm,
+    group_by_plate, orient_frame_towards, place_from_markers, place_from_plate,
+    plate_local_points,
 )
 from anchors.solver import (
     average_rotations, constellation_conditioning, is_coplanar, marker_object_points,
@@ -784,6 +785,171 @@ class TestFitRigid(unittest.TestCase):
 
         _, _, rms = fit_rigid(src, src * 1.05)
         self.assertGreater(rms * 1000.0, 1.0)
+
+
+class TestUnitExtent(unittest.TestCase):
+    """
+    The cutout must cover the BUTTONS, not the screen.
+
+    The markers can only measure the screen, because that is what draws them. For the
+    WinCtrl MFDs that is 118 x 118 mm inside a 167 x 185 mm unit - less than half the
+    area that actually matters. Sizing to the screen is the wrong answer by construction.
+    """
+
+    class _Sol:
+        def __init__(self, p, spread=1.0):
+            self.position = np.asarray(p, float)
+            self.position_spread_mm = spread
+
+    def _unit_plate(self, **unit):
+        plate = dict(PLATE_C)
+        plate["unit_mm"] = dict({"w": 167.0, "h": 185.0}, **unit)
+        return plate
+
+    def _solutions_for(self, plate, pose):
+        local = plate_local_points(plate)
+        return {i: self._Sol(pose[:3, :3] @ v + pose[:3, 3]) for i, v in local.items()}
+
+    def test_falls_back_to_the_screen_when_no_unit_is_declared(self):
+        w, h, dx, dy = cutout_extent(PLATE_C)
+
+        self.assertAlmostEqual(w, 118.12, places=3)
+        self.assertAlmostEqual(h, 117.81, places=3)
+        self.assertEqual((dx, dy), (0.0, 0.0))
+
+    def test_unit_extent_covers_the_buttons(self):
+        plate = self._unit_plate()
+        pose = pose_to_matrix((0.0, 0.9, -0.5), (-11.0, 0.0, 1.0))
+
+        got = place_from_plate(plate, self._solutions_for(plate, pose))
+
+        self.assertAlmostEqual(got.width, 0.167, places=5)
+        self.assertAlmostEqual(got.height, 0.185, places=5)
+
+        # More than double the screen's area - the buttons are most of the unit.
+        screen = 0.11812 * 0.11781
+        self.assertGreater(got.width * got.height / screen, 2.0)
+
+    def test_offset_moves_the_cutout_in_its_own_plane(self):
+        """
+        A screen aperture that is not centred in its housing needs dx/dy, and the offset
+        lives in the CUTOUT's plane - applying it in world axes would slide the cutout off
+        the panel as soon as the panel is tilted, which every cockpit panel is.
+        """
+        plate = self._unit_plate(dy=20.0)
+        pose = pose_to_matrix((0.0, 0.9, -0.5), (-40.0, 0.0, 0.0))
+
+        centred = place_from_plate(self._unit_plate(), self._solutions_for(plate, pose))
+        offset = place_from_plate(plate, self._solutions_for(plate, pose))
+
+        moved = offset.position - centred.position
+
+        self.assertAlmostEqual(float(np.linalg.norm(moved)), 0.020, places=6)
+
+        # It moved along the panel's own up axis, not the world's.
+        up = pose[:3, :3] @ np.array([0.0, 1.0, 0.0])
+        self.assertAlmostEqual(float(moved @ up), 0.020, places=6)
+        self.assertLess(abs(moved[1]), 0.020, "a tilted panel's up is not the world's up")
+
+    def test_margin_still_applies_on_top_of_the_unit(self):
+        plate = self._unit_plate()
+        pose = pose_to_matrix((0.0, 0.9, -0.5), (0.0, 0.0, 0.0))
+        sols = self._solutions_for(plate, pose)
+
+        got = place_from_plate(plate, sols, margin_mm=30.0)
+
+        self.assertAlmostEqual(got.width, 0.197, places=5)
+        self.assertAlmostEqual(got.height, 0.215, places=5)
+
+    def test_shipped_plates_declare_their_unit(self):
+        """The WinCtrl plates must size to the MFD housing, or the buttons stay hidden."""
+        import glob
+        import json
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+        for path in glob.glob(os.path.join(root, "PRINT-THESE", "plates",
+                                           "plate-winctrl-*.json")):
+            with open(path) as f:
+                g = json.load(f)
+
+            w, h, _, _ = cutout_extent(g)
+
+            self.assertGreater(w, g["usable_mm"]["w"], g["name"])
+            self.assertGreater(h, g["usable_mm"]["h"], g["name"])
+
+
+class TestCoverAll(unittest.TestCase):
+    """
+    One cutout over the whole assembly. The centre console carries no markers at all, so
+    this is the only way to reach it before stickers arrive.
+    """
+
+    class _Sol:
+        def __init__(self, p, spread=1.0):
+            self.position = np.asarray(p, float)
+            self.position_spread_mm = spread
+
+    def _three_panels(self, tilts=(-11.0, -8.0, -26.0)):
+        sols = {}
+        base = 0
+
+        for n, (tilt, origin) in enumerate(zip(tilts, [(-0.16, 0.89, -0.49),
+                                                       (0.21, 0.90, -0.48),
+                                                       (0.03, 0.69, -0.45)])):
+            pose = pose_to_matrix(origin, (tilt, 0.0, 0.0))
+            for i, v in plate_local_points(PLATE_C).items():
+                sols[base + (i - 4)] = self._Sol(pose[:3, :3] @ v + pose[:3, 3])
+            base += 4
+
+        return sols
+
+    def test_spans_everything_and_prices_the_flattening(self):
+        sols = self._three_panels()
+        placed = [object()]                       # only its count matters here
+
+        got = cover_all(placed, sols, 530.0, 430.0, viewpoint=(0.0, 1.1, -0.2))
+
+        self.assertIsNotNone(got)
+        self.assertAlmostEqual(got.width, 0.530, places=5)
+        self.assertAlmostEqual(got.height, 0.430, places=5)
+        self.assertEqual(len(got.marker_ids), 12)
+
+        # Panels at different tilts cannot be exactly coplanar, and the number must be
+        # reported rather than assumed away.
+        self.assertGreater(got.flatness_mm, 1.0)
+        self.assertLess(got.flatness_mm, 60.0)
+
+    def test_coplanar_panels_cost_nothing(self):
+        got = cover_all([object()], self._three_panels(tilts=(-11.0, -11.0, -11.0)),
+                        530.0, 430.0, viewpoint=(0.0, 1.1, -0.2))
+
+        self.assertLess(got.flatness_mm, 30.0,
+                        "panels at one tilt should flatten cheaply")
+
+    def test_normal_faces_the_viewer(self):
+        viewpoint = np.array([0.0, 1.1, -0.2])
+        got = cover_all([object()], self._three_panels(), 530.0, 430.0, viewpoint)
+
+        normal = euler_xyz_to_matrix(*got.euler_deg)[:, 2]
+        self.assertGreater(float(normal @ (viewpoint - got.position)), 0.0)
+
+    def test_needs_three_markers(self):
+        sols = {0: self._Sol((0, 0, 0)), 1: self._Sol((0.1, 0, 0))}
+        self.assertIsNone(cover_all([object()], sols, 530.0, 430.0, (0, 1.1, 0)))
+
+    def test_flattening_cost_follows_the_depth_relation(self):
+        """
+        shift = baseline x deviation / distance^2. The same relation that governs the
+        whole project's depth budget - halving the distance quadruples the error.
+        """
+        near = flattening_cost_mm(24.0, 0.4)
+        far = flattening_cost_mm(24.0, 0.8)
+
+        self.assertAlmostEqual(near / far, 4.0, places=6)
+        self.assertAlmostEqual(flattening_cost_mm(24.0, 0.4),
+                               0.15 * 0.024 / 0.16 * 1000.0, places=6)
+        self.assertEqual(flattening_cost_mm(24.0, 0.0), 0.0)
 
 
 if __name__ == "__main__":

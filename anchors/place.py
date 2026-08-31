@@ -215,11 +215,93 @@ def place_from_plate(plate, solutions, margin_mm=0.0):
 
     r, t, rms = fit_rigid(src, dst)
 
-    u = plate["usable_mm"]
-    width = u["w"] / 1000.0 + margin_mm / 1000.0
-    height = u["h"] / 1000.0 + margin_mm / 1000.0
+    w_mm, h_mm, dx_mm, dy_mm = cutout_extent(plate)
+
+    width = (w_mm + margin_mm) / 1000.0
+    height = (h_mm + margin_mm) / 1000.0
+
+    # The unit's centre is not the screen's centre, and the offset lives in the CUTOUT's
+    # plane, so it has to be rotated into the world before being added.
+    position = t + r @ np.array([dx_mm / 1000.0, dy_mm / 1000.0, 0.0])
 
     spread = float(np.mean([solutions[int(i)].position_spread_mm for i in have]))
 
-    return CutoutPlacement(plate.get("name", "plate"), t, matrix_to_euler_xyz(r),
+    return CutoutPlacement(plate.get("name", "plate"), position, matrix_to_euler_xyz(r),
                            width, height, [int(i) for i in have], rms * 1000.0, spread)
+
+
+def cutout_extent(plate):
+    """
+    How big the cutout should be, and where its centre sits relative to the screen's.
+
+    Returns (width_mm, height_mm, dx_mm, dy_mm).
+
+    The markers can only ever measure the SCREEN, because that is what draws them. But
+    the point of a cutout is the physical BUTTONS around the screen, so the screen's
+    extent is the wrong answer by design - for the WinCtrl MFDs it is 118 x 118 mm inside
+    a 167 x 185 mm unit, which is less than half the area that matters.
+
+    `unit_mm` in the plate JSON carries the real thing: w, h, and an optional dx/dy for
+    units whose screen aperture is not centred in the housing. Without it this falls back
+    to the usable screen area, which is honest but small.
+    """
+    u = plate["usable_mm"]
+    unit = plate.get("unit_mm")
+
+    if not unit:
+        return float(u["w"]), float(u["h"]), 0.0, 0.0
+
+    return (float(unit["w"]), float(unit["h"]),
+            float(unit.get("dx", 0.0)), float(unit.get("dy", 0.0)))
+
+
+def cover_all(placed, solutions, width_mm, height_mm, viewpoint):
+    """
+    ONE cutout spanning every solved panel, on their common best-fit plane.
+
+    The goal is the buttons and the console, not the screens - and the console carries no
+    markers at all. A single hole over the whole assembly reaches all of it, is one mesh
+    instead of several, and is by far the quickest way to find out whether anchoring works
+    at all.
+
+    The cost is flattening: the panels are not exactly coplanar, so a flat cutout sits
+    slightly in front of or behind each surface, and passthrough at the wrong depth shifts
+    sideways by roughly `baseline x deviation / distance^2`. Returns the placement with
+    that deviation in `flatness_mm` so the caller can report the price rather than hide it.
+    """
+    if not placed:
+        return None
+
+    pts = np.array([s.position for s in solutions.values()])
+
+    if len(pts) < 3:
+        return None
+
+    origin, r, _ = fit_plane_frame(pts)
+    r = orient_frame_towards(origin, r, viewpoint)
+
+    # Centre on the markers' own centroid, projected into the plane. Sizing is given, not
+    # measured: the assembly extends well past the last marker, which is the whole point.
+    deviations = (pts - origin) @ r[:, 2]
+    span_mm = float(deviations.max() - deviations.min()) * 1000.0
+
+    ids = sorted(int(i) for i in solutions)
+    spread = float(np.mean([solutions[i].position_spread_mm for i in ids]))
+
+    return CutoutPlacement("cockpit", origin, matrix_to_euler_xyz(r),
+                           width_mm / 1000.0, height_mm / 1000.0, ids, span_mm, spread)
+
+
+def flattening_cost_mm(deviation_mm, distance_m, baseline_m=0.15):
+    """
+    How far passthrough shifts sideways when a cutout sits at the wrong depth.
+
+    The camera is not at the eye, so a surface rendered at the wrong distance lands in the
+    wrong place: `baseline x deviation / distance^2`. This is the same relation that
+    governs the whole project's depth budget, applied to the error a FLAT cutout makes
+    over a not-quite-flat assembly.
+    """
+    if distance_m <= 1e-6:
+        return 0.0
+
+    return float(baseline_m * (deviation_mm / 1000.0) / (distance_m ** 2) * 1000.0)
