@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from anchors.camera_rig import CAMERA_OFFSET, apply_offset_delta
+from anchors.detect import plate_size_overrides, refresh_sizes
 from anchors.place import (
     cover_all, flattening_cost_mm, measure_range_scale, place_from_markers,
     place_from_plate, shaped_cutout,
@@ -127,6 +128,69 @@ def reset_quads(config_path, force):
     print()
     print("  Place them again with:")
     print("    python scripts/place_cutouts.py --exclude-screens --write")
+
+    return 0
+
+
+def calibrate_plates(plates, solutions):
+    """
+    Write each display plate's EFFECTIVE marker size, measured from this capture.
+
+    The drawn size is not the measured size. A black square on a bright emissive panel
+    blooms at its edges, so the detector finds a border inside the one that was drawn, and
+    every range comes out proportionally too far.
+
+    Calibrating it into the plate JSON beats carrying a --range-scale flag around: the
+    number belongs to the panel, not to the command line, and a flag that has to be
+    remembered is a flag that will be forgotten.
+    """
+    import json
+
+    measured = measure_range_scale(plates, solutions)
+
+    if not measured:
+        print("  No plate had three solved markers, so there is nothing to calibrate.")
+        return 1
+
+    by_name = {p["name"]: p for p in plates}
+    print(f"  {'plate':14} {'drawn':>9} {'effective':>10} {'scale':>8} {'residual':>10}")
+
+    for name, k, residual in measured:
+        plate = by_name.get(name)
+
+        if plate is None:
+            continue
+
+        drawn = float(plate["marker_mm"])
+        effective = drawn / k
+
+        print(f"  {name:14} {drawn:8.3f}mm {effective:9.3f}mm {k:8.4f} {residual:8.2f} mm")
+
+        path = os.path.join(PLATES, f"plate-{name}.json")
+
+        if not os.path.exists(path):
+            print(f"    (no file at {path}, skipped)")
+            continue
+
+        with open(path) as f:
+            g = json.load(f)
+
+        g["marker_mm_effective"] = round(effective, 3)
+        g["marker_mm_effective_note"] = (
+            "measured, not drawn: a black square on a bright emissive panel blooms at its "
+            "edges, so the detected border sits inside the drawn one")
+
+        with open(path, "w") as f:
+            json.dump(g, f, indent=2)
+            f.write("\n")
+
+    print()
+    print("  Written into the plate JSONs. Placement now needs no --range-scale.")
+    print("  Re-run the calibration if the panel brightness or the camera exposure changes,")
+    print("  since the bloom that causes this depends on both.")
+    print()
+    print("  NOTE this is calibrated for DISPLAY panels. Printed stickers do not bloom and")
+    print("  will need their own number - that is the vinyl-vs-screen gap still unmeasured.")
 
     return 0
 
@@ -262,6 +326,10 @@ def main():
                     help="grow every cutout by this many mm on all sides")
     ap.add_argument("--start", type=int, default=0,
                     help="first quad index to use, so earlier ones are left alone")
+    ap.add_argument("--calibrate", action="store_true",
+                    help="measure each display plate's EFFECTIVE marker size from this "
+                         "capture and write it into the plate JSON, so every future "
+                         "placement is correct without --range-scale.")
     ap.add_argument("--reset", action="store_true",
                     help="disable and clear EVERY cutout, then stop. Use when the config "
                          "has been hand-edited into a state you no longer trust.")
@@ -306,6 +374,17 @@ def main():
         print(f"  capture predates the current camera calibration; shifting cameras by "
               f"{np.round(delta * 1000, 1)} mm")
 
+    # Marker sizes are re-read from the plates, so a calibration reaches captures already
+    # taken. Without this, --calibrate would only help the NEXT sweep - and the number it
+    # writes was measured from the sweep you already have.
+    if not a.calibrate:
+        observations, resized = refresh_sizes(observations, plate_size_overrides())
+
+        if resized:
+            first = next(iter(resized.values()))
+            print(f"  applying calibrated marker sizes to {len(resized)} observation ids "
+                  f"({first[0]:.3f} -> {first[1]:.3f} mm and similar)")
+
     if a.range_scale != 1.0:
         # Range is inferred from a marker's APPARENT size: range = focal * size / pixels.
         # So scaling range IS scaling the assumed marker size - applying it there rather
@@ -345,6 +424,9 @@ def main():
             print()
             print("  A uniform pixel-pitch error would NOT show here - it scales the marker")
             print("  size and the spacing together and cancels. This means the two disagree.")
+
+    if a.calibrate:
+        return calibrate_plates(plates, solutions)
 
     placed, loose = placements(solutions, plates, a.margin)
 

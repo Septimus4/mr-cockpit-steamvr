@@ -32,6 +32,7 @@ from anchors.solver import (
     marker_object_points, solve_marker_pose, solve_markers,
 )
 from anchors.detect import (
+    refresh_sizes,
     detect_markers, is_diagnostic_id, make_detector, plate_size_overrides, summarise,
 )
 from anchors.synthetic import (
@@ -1409,7 +1410,11 @@ class TestRealCockpitOutline(unittest.TestCase):
         cameras, _ = apply_offset_delta(
             cameras, z["camera_offset"] if "camera_offset" in z.files else None)
 
-        self.solutions = solve_markers(list(z["observations"]), cameras)
+        # The same two corrections place_cutouts applies, in the same order. A test that
+        # skipped them would pin an outline the tool never produces.
+        observations, _ = refresh_sizes(list(z["observations"]), plate_size_overrides())
+
+        self.solutions = solve_markers(observations, cameras)
 
         self.plates = {}
         for path in sorted(glob.glob(os.path.join(root, "PRINT-THESE", "plates",
@@ -1638,6 +1643,104 @@ class TestFitSimilarity(unittest.TestCase):
 
             self.assertAlmostEqual(float(np.linalg.det(r)), 1.0, places=9)
             self.assertGreater(k, 0.0)
+
+
+class TestEffectiveMarkerSize(unittest.TestCase):
+    """
+    The size the camera MEASURES is not the size that was drawn.
+
+    A black square on a bright emissive panel blooms at its edges, so the detector finds a
+    border inside the drawn one. Measured on this hardware: 3.4%, about 0.55 mm per edge,
+    which put every panel 3.4% too far away.
+
+    Calibrating that into the plate JSON is what stops it being a flag someone has to
+    remember to pass.
+    """
+
+    def test_effective_size_wins_over_drawn(self):
+        import json
+        import tempfile
+
+        d = tempfile.mkdtemp()
+        plate = {"name": "p", "kind": "display", "marker_mm": 32.812,
+                 "marker_mm_effective": 31.721, "ids": [0, 1]}
+
+        with open(os.path.join(d, "plate-p.json"), "w") as f:
+            json.dump(plate, f)
+
+        got = plate_size_overrides(d)
+
+        self.assertAlmostEqual(got[0], 31.721, places=3)
+        self.assertAlmostEqual(got[1], 31.721, places=3)
+
+    def test_falls_back_to_drawn_when_uncalibrated(self):
+        import json
+        import tempfile
+
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "plate-p.json"), "w") as f:
+            json.dump({"name": "p", "kind": "display", "marker_mm": 32.812, "ids": [0]}, f)
+
+        self.assertAlmostEqual(plate_size_overrides(d)[0], 32.812, places=3)
+
+    def test_shipped_plates_are_calibrated_and_smaller_than_drawn(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        plates = os.path.join(root, "PRINT-THESE", "plates")
+
+        import glob
+        import json
+
+        for path in glob.glob(os.path.join(plates, "plate-winctrl-*.json")):
+            with open(path) as f:
+                g = json.load(f)
+
+            self.assertIn("marker_mm_effective", g, g["name"])
+
+            # Bloom can only ever make the detected square SMALLER. A calibration that
+            # came out larger would mean the fit had absorbed something else.
+            self.assertLess(g["marker_mm_effective"], g["marker_mm"], g["name"])
+            self.assertGreater(g["marker_mm_effective"], g["marker_mm"] * 0.9, g["name"])
+
+
+class TestRefreshSizes(unittest.TestCase):
+    """
+    A capture stores the size each marker was solved with. Re-reading the current sizes at
+    replay time is what lets a calibration reach captures already taken - otherwise the
+    number measured FROM a sweep could only be used by the next sweep.
+    """
+
+    def _obs(self, size_mm=32.812):
+        return [Observation(0, np.zeros((4, 2)), np.eye(4), size_mm, 0),
+                Observation(1, np.zeros((4, 2)), np.eye(4), size_mm, 0)]
+
+    def test_applies_new_sizes_and_reports_them(self):
+        out, changed = refresh_sizes(self._obs(), {0: 31.721, 1: 31.721})
+
+        self.assertEqual(len(changed), 2)
+        self.assertAlmostEqual(out[0].size_mm, 31.721, places=3)
+        self.assertEqual(changed[0], (32.812, 31.721))
+
+    def test_untouched_when_nothing_changed(self):
+        obs = self._obs()
+        out, changed = refresh_sizes(obs, {0: 32.812, 1: 32.812})
+
+        self.assertEqual(changed, {})
+        self.assertIs(out[0], obs[0], "an unchanged observation should not be rebuilt")
+
+    def test_ids_with_no_override_keep_their_size(self):
+        """Stickers have no plate, so their size still comes from the id map."""
+        out, changed = refresh_sizes(self._obs(), {0: 31.721})
+
+        self.assertAlmostEqual(out[1].size_mm, 32.812, places=3)
+        self.assertNotIn(1, changed)
+
+    def test_everything_else_survives(self):
+        obs = self._obs()
+        out, _ = refresh_sizes(obs, {0: 30.0})
+
+        self.assertEqual(out[0].marker_id, 0)
+        self.assertEqual(out[0].frame, 0)
+        np.testing.assert_allclose(out[0].camera_to_world, np.eye(4))
 
 
 if __name__ == "__main__":

@@ -88,8 +88,18 @@ def plate_size_overrides(plates_dir=None):
         if g.get("kind") != "display":
             continue
 
+        # marker_mm is what was DRAWN. marker_mm_effective is what the camera actually
+        # measures, which is smaller: a black square on a bright emissive panel blooms at
+        # its edges, so the detected border sits inside the drawn one. Measured on this
+        # hardware at 3.4%, or about 0.55 mm per edge.
+        #
+        # Using the drawn size would put every panel 3.4% too far away - and because a
+        # cutout of fixed physical size placed further away subtends a smaller angle, it
+        # reads as the cutout being both too small and too distant.
+        size = float(g.get("marker_mm_effective") or g["marker_mm"])
+
         for marker_id in g.get("ids", []):
-            out[int(marker_id)] = float(g["marker_mm"])
+            out[int(marker_id)] = size
 
     return out
 
@@ -160,3 +170,33 @@ def summarise(observations, rejected=None):
         lines.append(f"  SKIPPED {marker_id}: {why}")
 
     return "\n".join(lines)
+
+
+def refresh_sizes(observations, size_overrides):
+    """
+    Re-apply the CURRENT marker sizes to observations recorded earlier.
+
+    A capture stores the size each marker was solved with, so a later calibration would
+    otherwise not reach it and the fix would only apply to captures taken afterwards -
+    which means re-sweeping the cockpit to benefit from a number that was measured from
+    the sweep you already have.
+
+    Returns (observations, {marker_id: (old_mm, new_mm)}) so the change can be reported
+    rather than silently altering what a capture means.
+    """
+    from .solver import Observation
+
+    out = []
+    changed = {}
+
+    for o in observations:
+        size = (size_overrides or {}).get(o.marker_id)
+
+        if size is None or abs(size - o.size_mm) < 1e-9:
+            out.append(o)
+            continue
+
+        changed[o.marker_id] = (o.size_mm, size)
+        out.append(Observation(o.marker_id, o.corners_px, o.camera_to_world, size, o.frame))
+
+    return out, changed

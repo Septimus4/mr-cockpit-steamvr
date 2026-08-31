@@ -34,7 +34,7 @@ break the default locations:
 
 ## Tests
 
-    .venv\Scripts\python.exe -m unittest discover -s tests      # 194, no hardware
+    .venv\Scripts\python.exe -m unittest discover -s tests      # 201, no hardware
     cd ..\rectus\src && tests\run_tests.bat                     # 62 checks, C++ mesh
 
 ## Calibrating a cockpit

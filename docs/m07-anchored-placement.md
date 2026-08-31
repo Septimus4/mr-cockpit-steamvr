@@ -211,6 +211,36 @@ Range is inferred from apparent size:
 so the directions to the markers are well measured and only the RANGE is in doubt. It
 depends on two numbers that could be wrong: the assumed marker size, and the focal length.
 
+### The drawn size is not the measured size
+
+Solved 2026-08-31. Two things it is NOT, both ruled out algebraically:
+
+- a **pixel-pitch** error scales the assumed marker size and the assumed spacing together
+  and cancels
+- a **focal length** error cancels too: separation = size x (spacing_px / marker_px)
+
+What is left is that the camera measures the marker SMALLER than it was drawn. On a
+bright emissive panel a black square blooms at its edges, so the detected border sits
+inside the drawn one — 3.4%, about **0.55 mm per edge**. Range is inferred from apparent
+size, so every panel landed 3.4% too far away.
+
+That is calibrated per plate rather than carried on the command line, because the number
+belongs to the panel and a flag that must be remembered will be forgotten:
+
+    python scripts/place_cutouts.py --calibrate
+
+writes `marker_mm_effective` into each plate JSON, which `plate_size_overrides` then
+prefers over `marker_mm`. Measured: 32.812 mm drawn, **32.1 / 31.7 / 31.3 mm effective**.
+Afterwards all three plates fit at scale **1.000 ± 0.001**.
+
+Marker sizes are re-read at replay time, so the calibration reaches captures already
+taken — the number was measured *from* the sweep you already have, and needing a fresh
+sweep to use it would be perverse.
+
+Re-run it if panel brightness or camera exposure changes; the bloom depends on both. And
+note it is calibrated for DISPLAY panels — printed stickers do not bloom and will need
+their own number, which is the vinyl-vs-screen gap still unmeasured.
+
 **It can be measured, not guessed.** Each plate's marker layout is known, so fitting it
 *with* scale reads the error straight off — a constellation solved k times too big is
 solved k times too far, because range and apparent size are the same measurement. This is
@@ -273,6 +303,7 @@ Replays the last capture — no camera, no headset — and prints what it would 
 | `--screen-shrink MM` | pull each screen hole in, default 3 mm |
 | `--range-scale K` | scale solved range; below 1 pulls the pit closer |
 | `--reset` | disable and clear every cutout, then stop |
+| `--calibrate` | measure and store each plate's effective marker size |
 | `--config PATH` | write somewhere else — useful for testing |
 
 Sweep once with `scripts/solve_anchors.py`, then place as many times as you like.
