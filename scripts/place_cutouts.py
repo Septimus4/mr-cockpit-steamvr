@@ -47,6 +47,35 @@ PLATES = os.path.join(ROOT, "PRINT-THESE", "plates")
 RESIDUAL_WARN_MM = 12.0
 
 
+# The settings menu holds the whole config in memory and writes ALL of it back whenever
+# anything changes. A file written underneath it is not merged, it is discarded the moment
+# the user touches a slider - and the symptom is the worst kind: the tool reports success,
+# the layer loads the OLD values, and it looks like placement simply does not work.
+MENU_PROCESS = "passthrough-menu.exe"
+
+
+def menu_is_running():
+    """
+    Whether the passthrough settings menu is up. None if it cannot be determined.
+
+    Not knowing is reported as not knowing: refusing to write on a failed check would
+    block the tool on machines where tasklist is unavailable, and writing silently would
+    reintroduce exactly the bug this guards.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {MENU_PROCESS}"],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    if out.returncode != 0:
+        return None
+
+    return MENU_PROCESS.lower() in out.stdout.lower()
+
+
 def load_display_plates():
     out = []
 
@@ -171,6 +200,9 @@ def main():
     ap.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     ap.add_argument("--write", action="store_true",
                     help="actually write. Without this it only shows what it would do.")
+    ap.add_argument("--force", action="store_true",
+                    help="write even if the settings menu is running. It will very "
+                         "likely be overwritten; close the menu instead.")
     ap.add_argument("--margin", type=float, default=0.0,
                     help="grow every cutout by this many mm on all sides")
     ap.add_argument("--start", type=int, default=0,
@@ -261,6 +293,24 @@ def main():
         print(f"\n  No config at {a.config}")
         print("  Run the passthrough layer once so it writes its defaults.")
         return 1
+
+    running = menu_is_running()
+
+    if running and not a.force:
+        print(f"\n  REFUSING TO WRITE: {MENU_PROCESS} is running.")
+        print()
+        print("  The menu holds the whole config in memory and writes ALL of it back the")
+        print("  moment anything changes. Whatever is written now is discarded as soon as")
+        print("  you touch a slider - and it fails silently: this tool reports success,")
+        print("  the layer loads the old values, and placement looks broken.")
+        print()
+        print("  Close the menu, run this again, then reopen the menu.")
+        print("  --force overrides, but the write will probably be lost.")
+        return 1
+
+    if running is None:
+        print(f"\n  Could not tell whether {MENU_PROCESS} is running. If it is, close it")
+        print("  first - it overwrites this file wholesale when anything changes.")
 
     backup = a.config + ".bak"
     shutil.copy2(a.config, backup)
