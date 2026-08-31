@@ -76,7 +76,54 @@ def placements(solutions, plates, margin_mm):
     return placed, loose
 
 
-def describe(placed, loose, solutions):
+def head_frame(cameras):
+    """
+    Where the head was during the capture, and which way it faced.
+
+    Returns (position, yaw_forward) in stage coordinates, or None. Used only to say where
+    to LOOK: a cutout is a small object, and "0.37 m away, 20 degrees down" is the
+    difference between finding it and concluding the feature is broken.
+    """
+    if not cameras:
+        return None
+
+    cams = list(cameras.values())
+    position = np.mean([c.camera_to_world[:3, 3] for c in cams], axis=0)
+
+    # Camera forward is +Z in the OpenCV frame the capture uses.
+    forward = np.mean([c.camera_to_world[:3, :3] @ np.array([0.0, 0.0, 1.0])
+                       for c in cams], axis=0)
+    forward[1] = 0.0                     # yaw only; pitch is what we are reporting
+    n = np.linalg.norm(forward)
+
+    if n < 1e-6:
+        return None
+
+    return position, forward / n
+
+
+def where_to_look(placement, head):
+    """One line saying where a cutout is, from where the capture was taken."""
+    position, forward = head
+    d = placement.position - position
+
+    right = np.cross(forward, np.array([0.0, 1.0, 0.0]))
+    right /= np.linalg.norm(right)
+
+    ahead = float(d @ forward)
+    across = float(d @ right)
+    up = float(d[1])
+
+    horizontal = float(np.hypot(ahead, across))
+    pitch = np.degrees(np.arctan2(up, horizontal)) if horizontal > 1e-6 else 0.0
+    yaw = np.degrees(np.arctan2(across, ahead)) if abs(ahead) > 1e-6 else 0.0
+
+    return (f"{np.linalg.norm(d):.2f} m away, look "
+            f"{abs(pitch):.0f} deg {'up' if pitch > 0 else 'down'} and "
+            f"{abs(yaw):.0f} deg {'right' if yaw > 0 else 'left'}")
+
+
+def describe(placed, loose, solutions, head=None):
     for c in placed:
         p = c.position
         print(f"\n  {c.name}")
@@ -87,6 +134,9 @@ def describe(placed, loose, solutions):
         print(f"    markers   {c.marker_ids}")
         print(f"    fit       {c.flatness_mm:.1f} mm residual, "
               f"{c.spread_mm:.1f} mm mean per-view spread")
+
+        if head is not None:
+            print(f"    from you  {where_to_look(c, head)}")
 
         if c.flatness_mm > RESIDUAL_WARN_MM:
             print(f"    ^ the solved markers disagree with this panel's measured geometry")
@@ -141,7 +191,16 @@ def main():
         print("  Put the markers up (python scripts/show_all_plates.py) and sweep again.")
         return 1
 
-    describe(placed, loose, solutions)
+    head = head_frame(cameras)
+    describe(placed, loose, solutions, head)
+
+    if head is not None:
+        total = sum(c.width * c.height for c in placed) * 1e4
+        print(f"\n  Together these cutouts are {total:.0f} square cm of passthrough, and")
+        print("  they are the ONLY passthrough if QuadsExclusive is on. That is a small")
+        print("  target: looking straight ahead you will see nothing at all. Look where")
+        print("  the lines above say, or run with --margin 200 once to make them big")
+        print("  enough to find, then place again without it.")
 
     if a.start + len(placed) > MAX_QUADS:
         print(f"\n  {len(placed)} cutouts from index {a.start} would exceed the layer's "
