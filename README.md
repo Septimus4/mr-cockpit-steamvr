@@ -44,8 +44,8 @@ Touch the corners of what you want to see through, with a tracked controller.
 No camera, no markers, no sweep - see
 [docs/touch-calibration.md](docs/touch-calibration.md).
 
-    .venv\Scripts\python.exe scripts	ouch_cutouts.py --tip
-    .venv\Scripts\python.exe scripts	ouch_cutouts.py
+    .venv\Scripts\python.exe scripts\touch_cutouts.py --tip
+    .venv\Scripts\python.exe scripts\touch_cutouts.py
 
 ### The camera path
 
