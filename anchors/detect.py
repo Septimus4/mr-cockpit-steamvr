@@ -32,11 +32,29 @@ def is_diagnostic_id(marker_id):
     return DIAG_BASE <= marker_id <= DIAG_LAST
 
 
-def make_detector(dictionary_name="DICT_4X4_50"):
+def make_detector(dictionary_name="DICT_4X4_50", refine=True):
+    """
+    A detector with SUBPIXEL CORNER REFINEMENT on.
+
+    OpenCV defaults to CORNER_REFINE_NONE, which locates corners to about a pixel. That
+    is the single largest error source in the solve: range is inferred from a marker's
+    apparent size, so a pixel of corner error on a 70-pixel marker is 1.4% of range -
+    about 9 mm at half a metre, which is exactly the residual measured on real cockpit
+    data after size, time skew, camera rotation, camera offset and pose flips had all
+    been ruled out.
+    """
     import cv2
 
     d = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, dictionary_name))
-    return cv2.aruco.ArucoDetector(d, cv2.aruco.DetectorParameters())
+    params = cv2.aruco.DetectorParameters()
+
+    if refine:
+        params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+        params.cornerRefinementWinSize = 5
+        params.cornerRefinementMaxIterations = 30
+        params.cornerRefinementMinAccuracy = 0.01
+
+    return cv2.aruco.ArucoDetector(d, params)
 
 
 def plate_size_overrides(plates_dir=None):

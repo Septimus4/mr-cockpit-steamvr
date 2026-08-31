@@ -474,5 +474,51 @@ class TestSizeOverrides(unittest.TestCase):
         self.assertAlmostEqual(out[0], 32.8, places=3)
 
 
+class TestCornerRefinement(unittest.TestCase):
+    """
+    OpenCV defaults to CORNER_REFINE_NONE, which locates corners to about a pixel. Range
+    is inferred from a marker's apparent size, so a pixel of error on a 70-pixel marker
+    is 1.4% of range - about 9 mm at half a metre.
+
+    That was the residual measured on real cockpit data once marker size, time skew,
+    camera rotation, camera offset and pose flips had all been ruled out, and it is worth
+    a test because the default is silent: detection succeeds either way, just less
+    precisely.
+    """
+
+    def test_subpixel_refinement_is_on_by_default(self):
+        import cv2
+        det = make_detector()
+        params = det.getDetectorParameters()
+        self.assertEqual(params.cornerRefinementMethod, cv2.aruco.CORNER_REFINE_SUBPIX)
+
+    def test_refinement_measurably_improves_accuracy(self):
+        """Not just that the flag is set - that it actually buys something."""
+        markers = plate_markers((0.0, 1.05, -0.62), (-20.0, 0.0, 0.0), 69.0,
+                                [0, 1, 2, 3], 32.8)
+        sizes = {i: 32.8 for i in markers}
+
+        def mean_error(refine):
+            det = make_detector(refine=refine)
+            errs = []
+            for head in arc_of_head_poses((0.0, 0.0, -0.62), 0.62, 5):
+                cam = camera_at(head)
+                frame, _ = render_frame(cam, markers, sizes)
+                obs, _ = detect_markers(frame, cam, detector=det, size_overrides=sizes)
+                for o in obs:
+                    r = solve_marker_pose(cam, o.corners_px, o.size_mm)
+                    if r is not None:
+                        errs.append(np.linalg.norm(r[0][:3, 3] -
+                                                   markers[o.marker_id][:3, 3]) * 1000.0)
+            return float(np.mean(errs))
+
+        coarse = mean_error(False)
+        refined = mean_error(True)
+
+        self.assertLess(refined, coarse * 0.7,
+                        f"refinement should cut error substantially: "
+                        f"{coarse:.2f} mm -> {refined:.2f} mm")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
