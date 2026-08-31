@@ -1,0 +1,334 @@
+"""
+Build cutouts by touching your cockpit with a controller.
+
+Point at a real corner, pull the trigger, move to the next one. Four corners is a panel;
+walk the edge for a console. That is the whole calibration.
+
+No camera, no markers, no sweep, no holding still, no lens model, no marker-size
+calibration, no range scale. The controller tip is already in the same coordinates the
+cutouts live in, so a touched corner IS the corner - to Lighthouse accuracy, which is far
+better than anything the camera path could reach.
+
+The camera and markers keep the job they are good at: re-anchoring at runtime so a cutout
+measured once stays put. They were never able to measure a BUTTON, only the screen that
+draws them, and the buttons are the point.
+
+  python scripts/touch_cutouts.py --tip          calibrate the tip, once per controller
+  python scripts/touch_cutouts.py                measure cutouts
+  python scripts/touch_cutouts.py --start 2      leave Quad0 and Quad1 alone
+
+TRIGGER  record a point        GRIP  undo the last point
+MENU     finish this cutout    hold MENU 2s  finish everything
+"""
+
+import argparse
+import json
+import os
+import shutil
+import sys
+import time
+
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from anchors.probe import fit_pivot, outline_from_touches, pivot_conditioning, tip_position
+from tracing.capture import hmd_matrix_to_numpy
+from tracing.config_io import DEFAULT_CONFIG_PATH, MAX_QUADS, QuadConfig, read_quads, write_quad
+
+TIP_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "config-backups", "controller-tip.json")
+
+# The settings menu rewrites the whole config whenever anything changes, so anything
+# written underneath it is discarded the moment a slider moves. See place_cutouts.py.
+MENU_PROCESS = "passthrough-menu.exe"
+
+
+def menu_is_running():
+    import subprocess
+
+    try:
+        out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {MENU_PROCESS}"],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    return MENU_PROCESS.lower() in out.stdout.lower() if out.returncode == 0 else None
+
+
+def find_controllers(vr):
+    import openvr
+
+    out = []
+
+    for i in range(openvr.k_unMaxTrackedDeviceCount):
+        if vr.getTrackedDeviceClass(i) == openvr.TrackedDeviceClass_Controller:
+            out.append(i)
+
+    return out
+
+
+class Buttons:
+    """
+    Edge-triggered button state, so one press records one point.
+
+    Polling level rather than edges would record a hundred points per squeeze, and the
+    outline would come out as a cloud - which looks like the tracking being broken.
+    """
+
+    def __init__(self):
+        self.previous = 0
+
+    def pressed(self, mask, bit):
+        was = bool(self.previous & (1 << bit))
+        now = bool(mask & (1 << bit))
+        return now and not was
+
+
+def read_controller(vr, index):
+    """(pose_4x4 or None, button mask)."""
+    import openvr
+
+    ok, state, pose = vr.getControllerStateWithPose(
+        openvr.TrackingUniverseStanding, index, openvr.k_unMaxTrackedDeviceCount)
+
+    if not ok or not pose.bPoseIsValid:
+        return None, 0
+
+    return hmd_matrix_to_numpy(pose.mDeviceToAbsoluteTracking), state.ulButtonPressed
+
+
+def calibrate_tip(vr, index):
+    """
+    Solve where the controller's tip is, by pivoting it about one fixed point.
+
+    Not taken from the render model: the reported tip describes the controller the driver
+    THINKS you have, and a wrong tip offset displaces every later measurement by the same
+    amount - a failure that looks like perfect tracking of the wrong object, with nothing
+    in the residuals to give it away.
+    """
+    import openvr
+
+    print("\n  TIP CALIBRATION")
+    print("  Rest the controller's tip in one spot that will not move - a screw head, a")
+    print("  panel corner, a seam - and ROLL THE CONTROLLER AROUND IT in every direction")
+    print("  you can while keeping the tip planted.")
+    print("\n  Hold the TRIGGER to record. Release when it says GOOD. ESC to abort.\n")
+
+    buttons = Buttons()
+    poses = []
+    last_report = 0.0
+
+    while True:
+        pose, mask = read_controller(vr, index)
+
+        if pose is not None and (mask & (1 << openvr.k_EButton_SteamVR_Trigger)):
+            poses.append(pose)
+
+        if len(poses) >= 3 and time.time() - last_report > 0.4:
+            last_report = time.time()
+            spread, verdict = pivot_conditioning(poses)
+            tip, _, residual = fit_pivot(poses)
+            print(f"\r  {len(poses):4d} samples  spread {spread:5.1f} deg {verdict:9}"
+                  f"  wobble {residual * 1000:5.2f} mm   ", end="", flush=True)
+
+            if verdict == "GOOD" and residual < 0.004 and len(poses) > 120:
+                print("\n\n  Enough. Release the trigger.")
+                break
+
+        if not (mask & (1 << openvr.k_EButton_SteamVR_Trigger)) and len(poses) > 120:
+            break
+
+        time.sleep(0.01)
+        buttons.previous = mask
+
+    tip, _, residual = fit_pivot(poses)
+    spread, verdict = pivot_conditioning(poses)
+
+    if tip is None:
+        print("\n  Not enough samples.")
+        return None
+
+    print(f"\n  tip offset {np.round(tip, 4)} m from the controller origin")
+    print(f"  wobble {residual * 1000:.2f} mm, rotation spread {spread:.1f} deg {verdict}")
+
+    if verdict == "TOO FLAT":
+        print("\n  REJECTED: the controller was only turned about one axis. That fits the")
+        print("  data perfectly and still leaves the offset free along that axis - every")
+        print("  point you measure afterwards would be wrong by the same amount, with")
+        print("  nothing to show for it. Roll it in more directions and try again.")
+        return None
+
+    if residual > 0.004:
+        print("\n  REJECTED: the tip moved more than 4 mm during the pivot. Plant it in")
+        print("  something that locates it - a corner or a recess, not a flat surface.")
+        return None
+
+    os.makedirs(os.path.dirname(TIP_FILE), exist_ok=True)
+
+    with open(TIP_FILE, "w") as f:
+        json.dump({"tip_offset_m": [float(v) for v in tip],
+                   "wobble_mm": round(residual * 1000, 3),
+                   "spread_deg": round(spread, 1)}, f, indent=2)
+        f.write("\n")
+
+    print(f"\n  Saved to {TIP_FILE}")
+    return tip
+
+
+def load_tip():
+    if not os.path.exists(TIP_FILE):
+        return None
+
+    with open(TIP_FILE) as f:
+        return np.array(json.load(f)["tip_offset_m"], float)
+
+
+def measure_cutouts(vr, index, tip, start_index):
+    """Walk the user through touching one cutout after another."""
+    import openvr
+
+    print("\n  MEASURING")
+    print("  Touch the corners of what you want to see through. Four corners for a panel,")
+    print("  or walk the edge for an irregular console - the order you touch IS the shape.")
+    print("\n  TRIGGER record   GRIP undo   MENU finish this cutout   MENU again finish all\n")
+
+    buttons = Buttons()
+    cutouts = []
+    points = []
+    idle_menu = 0.0
+
+    while True:
+        pose, mask = read_controller(vr, index)
+
+        if pose is None:
+            time.sleep(0.02)
+            continue
+
+        if buttons.pressed(mask, openvr.k_EButton_SteamVR_Trigger):
+            p = tip_position(pose, tip)
+            points.append(p)
+            print(f"    point {len(points):2d}  {p[0]:+.4f} {p[1]:+.4f} {p[2]:+.4f}")
+
+        if buttons.pressed(mask, openvr.k_EButton_Grip) and points:
+            points.pop()
+            print(f"    undo -> {len(points)} point(s)")
+
+        if buttons.pressed(mask, openvr.k_EButton_ApplicationMenu):
+            if not points:
+                print("\n  Done.")
+                break
+
+            head = _head_position(vr)
+            name = f"cutout{start_index + len(cutouts)}"
+            got = outline_from_touches(name, points, head)
+
+            if got is None:
+                print("    need at least three points")
+            else:
+                cutouts.append(got)
+                print(f"\n  {name}: {got.width * 1000:.0f} x {got.height * 1000:.0f} mm, "
+                      f"{len(points)} points, {got.flatness_mm:.1f} mm out of plane")
+
+                if got.flatness_mm > 8.0:
+                    print("    ^ those touches are not flat. Did one slip off the bezel?")
+
+                print("    next cutout, or MENU again to finish\n")
+                points = []
+
+        buttons.previous = mask
+        time.sleep(0.005)
+
+    return cutouts
+
+
+def _head_position(vr):
+    import openvr
+
+    poses = vr.getDeviceToAbsoluteTrackingPose(
+        openvr.TrackingUniverseStanding, 0, openvr.k_unMaxTrackedDeviceCount)
+    hmd = poses[openvr.k_unTrackedDeviceIndex_Hmd]
+
+    if hmd.bPoseIsValid:
+        return hmd_matrix_to_numpy(hmd.mDeviceToAbsoluteTracking)[:3, 3]
+
+    return np.array([0.0, 1.2, 0.0])
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--tip", action="store_true", help="calibrate the controller tip")
+    ap.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    ap.add_argument("--start", type=int, default=0)
+    ap.add_argument("--force", action="store_true")
+    a = ap.parse_args()
+
+    import openvr
+
+    if menu_is_running() and not a.force:
+        print(f"  {MENU_PROCESS} is running and would overwrite whatever is written.")
+        print("  Close it first. --force overrides, but the write will probably be lost.")
+        return 1
+
+    vr = openvr.init(openvr.VRApplication_Background)
+
+    try:
+        controllers = find_controllers(vr)
+
+        if not controllers:
+            print("  No controller found. Turn one on and try again.")
+            return 1
+
+        index = controllers[0]
+        print(f"  controller {index}" + (f" (+{len(controllers) - 1} more, using the first)"
+                                         if len(controllers) > 1 else ""))
+
+        if a.tip:
+            return 0 if calibrate_tip(vr, index) is not None else 1
+
+        tip = load_tip()
+
+        if tip is None:
+            print("\n  No tip calibration yet. Run this first:")
+            print("    python scripts/touch_cutouts.py --tip")
+            return 1
+
+        print(f"  tip offset {np.round(tip, 4)} m")
+        cutouts = measure_cutouts(vr, index, tip, a.start)
+    finally:
+        openvr.shutdown()
+
+    if not cutouts:
+        print("  Nothing measured.")
+        return 0
+
+    if a.start + len(cutouts) > MAX_QUADS:
+        print(f"\n  {len(cutouts)} cutouts from index {a.start} exceeds the layer's "
+              f"{MAX_QUADS}-quad limit.")
+        return 1
+
+    if not os.path.exists(a.config):
+        print(f"\n  No config at {a.config}. Run the layer once so it writes its defaults.")
+        return 1
+
+    shutil.copy2(a.config, a.config + ".bak")
+    existing = read_quads(a.config)
+
+    for n, c in enumerate(cutouts):
+        i = a.start + n
+        write_quad(QuadConfig(i, enabled=True, name=c.name, position=c.position,
+                              euler_deg=c.euler_deg, width=c.width, height=c.height,
+                              points=c.points), a.config)
+        print(f"  Quad{i} <- {c.name}"
+              + (f"  (replaced {existing[i].label})" if existing[i].enabled else ""))
+
+    print(f"\n  Written. Previous config kept at {a.config}.bak")
+    print("  Restart the game, or reload the config from the passthrough menu.")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

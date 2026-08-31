@@ -9,13 +9,14 @@ a headset on is slow enough that it would not get done.
     cd mr-cockpit-steamvr
     .venv\Scripts\python.exe -m unittest discover -s tests
 
-206 tests, ~1.6 s.
+226 tests, ~1.6 s.
 
 | file | area |
 |------|------|
 | `tests/test_geometry.py` | rotation convention, planes, ray-plane intersection, camera frame, back-projection round trip, polygon helpers, simplification |
 | `tests/test_config_io.py` | the ini format shared with the C++ parser, reading poses, writing outlines without disturbing the file |
 | `tests/test_capture.py` | OpenVR pose conversion, capture save/load, and the END-TO-END pipeline |
+| `tests/test_probe.py` | controller tip calibration, and turning touched points into cutouts |
 | `tests/test_anchors.py` | marker detection, PnP solving, robust averaging, constellation conditioning, and turning solved markers into cutout poses |
 
 ## C++ — the mesh that actually ships

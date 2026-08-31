@@ -20,6 +20,7 @@ milestones, and the decisions log.
 | [docs/m04-vulkan.md](docs/m04-vulkan.md) | Vulkan parity |
 | [docs/m05-polygon-cutouts.md](docs/m05-polygon-cutouts.md) | arbitrary polygon cutouts |
 | [docs/m07-anchored-placement.md](docs/m07-anchored-placement.md) | solved markers to cutouts in the config |
+| [docs/touch-calibration.md](docs/touch-calibration.md) | building cutouts by touching the cockpit with a controller |
 
 ## Setup
 
@@ -34,12 +35,21 @@ break the default locations:
 
 ## Tests
 
-    .venv\Scripts\python.exe -m unittest discover -s tests      # 206, no hardware
+    .venv\Scripts\python.exe -m unittest discover -s tests      # 226, no hardware
     cd ..\rectus\src && tests\run_tests.bat                     # 62 checks, C++ mesh
 
 ## Calibrating a cockpit
 
-Markers up, sweep, place. No shape tracing, no numbers typed by hand.
+Touch the corners of what you want to see through, with a tracked controller.
+No camera, no markers, no sweep - see
+[docs/touch-calibration.md](docs/touch-calibration.md).
+
+    .venv\Scripts\python.exe scripts	ouch_cutouts.py --tip
+    .venv\Scripts\python.exe scripts	ouch_cutouts.py
+
+### The camera path
+
+Still here, and still what will re-anchor at runtime. Markers up, sweep, place:
 
     .venv\Scripts\python.exe scripts\show_all_plates.py     # markers on the panels
     .venv\Scripts\python.exe scripts\solve_anchors.py       # sweep, then it solves
@@ -51,7 +61,7 @@ freely. See [docs/m07-anchored-placement.md](docs/m07-anchored-placement.md).
 
 ## Layout
 
-    anchors/        marker detection, pose solving, and cutout placement (unit tested)
+    anchors/        marker detection, pose solving, touch probing, placement (unit tested)
     tracing/        geometry, capture and config I/O for the tracing tool (unit tested)
     tests/          the Python suite
     scripts/        the live tools (see below)
@@ -71,6 +81,7 @@ freely. See [docs/m07-anchored-placement.md](docs/m07-anchored-placement.md).
 | `show_1to1.py` | display an image at exactly 1:1, DPI-scaling proof |
 | `show_plate.py` | show markers on a USB display panel at a known physical size |
 | `show_all_plates.py` | put markers on every configured display panel at once |
+| `touch_cutouts.py` | build cutouts by touching the cockpit with a controller |
 | `solve_anchors.py` | sweep the cockpit and solve where the markers are |
 | `place_cutouts.py` | turn solved markers into cutouts in the layer's config |
 | `make_chessboard.py` | the camera calibration target |
