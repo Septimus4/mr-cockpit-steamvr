@@ -212,6 +212,33 @@ This is the division of labour worth keeping both methods for:
 | controller | measures the SHAPE exactly, buttons included |
 | markers | notice the frame moved, and put the shape back |
 
+## Cross-check: the two methods agree, and disagree by exactly the right amount
+
+Binding gives something the project never had — both methods measuring the same panels in
+the same frame, so they can be compared. Measured 2026-09-01:
+
+| touched | plate | dx | dy | **dz** | normal |
+|---|---|---|---|---|---|
+| left-mfd | winctrl-L | +23.5 | +30.0 | **+34.2 mm** | 1.7° |
+| right-mfd | winctrl-C | +45.1 | +29.8 | **+35.1 mm** | 4.1° |
+| centre | winctrl-R | +36.7 | +17.6 | **+33.6 mm** | 4.7° |
+
+The depth column is the result. **34.3 mm mean, 1.5 mm spread**, against a unit depth of
+30 mm on the manufacturer's drawing. The controller touched the bezel face; the markers are
+drawn on the screen, which is recessed behind it. Two entirely independent instruments —
+camera plus ArUco plus PnP, against Lighthouse plus a touched point — agreeing on a
+systematic difference to 1.5 mm, and that difference being a physical dimension neither of
+them was told about.
+
+It also explains something that was never diagnosed properly. **The marker-placed cutouts
+sat 34 mm too deep — on the screen plane rather than the button plane.** At 0.5 m with the
+15 cm camera-eye baseline that is `baseline x depth / distance^2` = **20 mm** of sideways
+shift, on top of everything else. Markers cannot see the bezel they are recessed behind,
+so no amount of solving them better would have found it.
+
+The in-plane columns are noisier (18–45 mm), being touch scatter plus whatever offset the
+screen aperture really has in its housing — the `dx`/`dy` that had to be assumed zero.
+
 ## Still true from the camera path
 
 - the layer and the settings menu both own `config.ini`, so the menu must be closed

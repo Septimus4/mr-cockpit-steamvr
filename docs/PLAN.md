@@ -419,6 +419,22 @@ None of this would have come from the synthetic tests, which build observations 
 perfect camera model and no time skew. Running against the real cockpit before porting was
 worth more than the 258 tests for finding it.
 
+### Why markers alone could never do it — measured 2026-09-01
+
+Cross-checking the touched cutouts against the marker-solved plates, in one stage frame,
+put a number on it. The touched panels sit **34.3 mm in front** of the marker-derived ones
+(1.5 mm spread across three), matching the 30 mm unit depth on the drawing: the controller
+touched the bezel face, the markers are on the screen recessed behind it.
+
+So every marker-placed cutout was 34 mm too deep — on the SCREEN plane, not the BUTTON
+plane. At 0.5 m with the 15 cm baseline that is 20 mm of sideways shift by itself. Markers
+cannot see the bezel they are recessed behind, so solving them better was never going to
+find it.
+
+It is also a genuine cross-validation: camera + ArUco + PnP against Lighthouse + touch,
+agreeing on a systematic offset to 1.5 mm, where that offset is a physical dimension
+neither instrument was told about.
+
 ### The cutouts are for the BUTTONS, not the screens
 
 Stated 2026-08-31: the point is to see the **physical buttons around the MFDs and the
