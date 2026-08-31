@@ -264,6 +264,32 @@ An emissive panel in a dark cockpit can bloom and drive the camera's exposure do
 `--bg` lowers the background level from white. Global-shutter cameras (the ELP is one)
 have no tearing risk from panel refresh.
 
+### Markers on a panel are for CALIBRATION, not for flying
+
+Show the markers, solve the panel's pose, then dismiss them. The panel goes back to
+displaying instruments - which is the whole point of cutting it out.
+
+That works because the division of labour is clean:
+
+| | solved | maintained by |
+|---|--------|---------------|
+| panel pose | once, from its own displayed markers | baked; the panel is bolted in |
+| cockpit frame | from stickers on coaming and consoles | continuously, while flying |
+
+A bolted-in panel does not move relative to the cockpit frame, so correcting the frame
+corrects every panel riding it. Drift, Lighthouse error and headset shift are all handled
+without any panel giving up display area.
+
+A displayed marker also measures better than a stuck one: it sits at a pixel-exact
+position on a surface whose geometry is known to the pitch, so the solved pose is as good
+as the camera allows rather than as good as the placement was.
+
+**If bake-once turns out not to hold** - a flexing pit, a knocked panel - a small marker
+in one corner gives continuous per-panel correction for a little display area. Worth
+knowing it exists; not worth designing for before the simple version has been tried. It
+is also self-diagnosing: if alignment drifts on the panels but holds on sticker-anchored
+regions, something is moving that should not be.
+
 ### Still worth sticking some markers
 
 Display panels in one cockpit are usually near-coplanar with each other. A few loose
