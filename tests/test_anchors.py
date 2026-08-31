@@ -21,9 +21,10 @@ from anchors.camera_rig import (
     CAMERA_OFFSET, CAMERA_OFFSET_LEGACY, apply_offset_delta, offset_delta,
 )
 from anchors.place import (
-    banded_outline, cover_all, cutout_extent, fit_plane_frame, fit_rigid,
-    flattening_cost_mm, group_by_plate, orient_frame_towards, panel_rects_in_plane,
-    place_from_markers, place_from_plate, plate_local_points, shaped_cutout,
+    banded_outline, bridge_hole, cover_all, cutout_extent, fit_plane_frame,
+    fit_rigid, flattening_cost_mm, group_by_plate, orient_frame_towards,
+    outline_with_holes, panel_rects_in_plane, place_from_markers, place_from_plate,
+    plate_local_points, rect_to_points, shaped_cutout,
 )
 from anchors.solver import (
     average_rotations, constellation_conditioning, is_coplanar, marker_object_points,
@@ -1158,6 +1159,171 @@ class TestCameraRig(unittest.TestCase):
 
         self.assertIs(out, cams)
         np.testing.assert_allclose(delta, np.zeros(3))
+
+
+class TestBridgedHoles(unittest.TestCase):
+    """
+    Cutting the MFD screens out of the outline, so the SIM draws the display and
+    passthrough covers only the buttons around it.
+
+    There is no second contour in the config format or in the C++ ear clipper, so one loop
+    has to describe outer and holes both. Bridging does it: a zero-width slit to the hole,
+    the hole walked the opposite way, and back along the same slit.
+
+    Area is the decisive check on both sides of the port. A hole whose winding is wrong
+    still triangulates - it just ADDS area, and the screen stays covered with camera video
+    while the outline looks broadly right.
+    """
+
+    def _area(self, points):
+        n = len(points)
+        return abs(sum(points[i][0] * points[(i + 1) % n][1] -
+                       points[(i + 1) % n][0] * points[i][1] for i in range(n))) / 2.0
+
+    def test_hole_removes_exactly_its_area(self):
+        outer = rect_to_points(-0.2, 0.2, -0.2, 0.2)
+        hole = rect_to_points(-0.1, 0.1, -0.1, 0.1)
+
+        loop = bridge_hole(outer, hole)
+
+        self.assertEqual(len(loop), 10, "four outer, four hole, two bridge duplicates")
+        self.assertAlmostEqual(self._area(loop), 0.16 - 0.04, places=9)
+
+    def test_winding_is_corrected_either_way(self):
+        """A caller should not have to know which way round to hand in a hole."""
+        outer = rect_to_points(-0.2, 0.2, -0.2, 0.2)
+        hole = rect_to_points(-0.1, 0.1, -0.1, 0.1)
+
+        forward = self._area(bridge_hole(outer, hole))
+        reversed_ = self._area(bridge_hole(outer, hole[::-1]))
+
+        self.assertAlmostEqual(forward, reversed_, places=9)
+        self.assertAlmostEqual(forward, 0.12, places=9)
+
+    def test_three_screens(self):
+        outer = rect_to_points(-0.3, 0.3, -0.2, 0.2)
+        holes = [rect_to_points(c - 0.05, c + 0.05, -0.05, 0.05)
+                 for c in (-0.18, 0.0, 0.18)]
+
+        loop, dropped = outline_with_holes(outer, holes)
+
+        self.assertEqual(dropped, 0)
+        self.assertAlmostEqual(self._area(loop), 0.6 * 0.4 - 3 * 0.01, places=9)
+
+    def test_holes_beyond_the_point_cap_are_dropped_not_truncated(self):
+        """
+        A truncated loop is not a polygon at all - it would draw as garbage, or fall back
+        to the rectangle with nothing to say why. Dropping a hole is a visible, reportable
+        loss instead.
+        """
+        from tracing.config_io import MAX_POINTS
+
+        outer = rect_to_points(-0.5, 0.5, -0.3, 0.3)
+        holes = [rect_to_points(c - 0.02, c + 0.02, -0.02, 0.02)
+                 for c in np.linspace(-0.4, 0.4, 8)]
+
+        loop, dropped = outline_with_holes(outer, holes)
+
+        self.assertLessEqual(len(loop), MAX_POINTS)
+        self.assertGreater(dropped, 0)
+        self.assertEqual(len(loop), 4 + (8 - dropped) * 6)
+
+    def test_a_hole_needs_three_points(self):
+        outer = rect_to_points(-0.2, 0.2, -0.2, 0.2)
+
+        self.assertEqual(bridge_hole(outer, [(0.0, 0.0), (0.1, 0.0)]), outer)
+
+    def test_matches_the_cpp_fixture(self):
+        """
+        These exact points are compiled into rectus tests/test_mesh.cpp. The Python suite
+        validates a PORT of the ear clipper, so pinning shared fixtures is what catches a
+        transcription error between the two.
+        """
+        expected = [(-0.20, -0.20), (-0.10, -0.10), (-0.10, 0.10), (0.10, 0.10),
+                    (0.10, -0.10), (-0.10, -0.10), (-0.20, -0.20), (0.20, -0.20),
+                    (0.20, 0.20), (-0.20, 0.20)]
+
+        got = bridge_hole(rect_to_points(-0.2, 0.2, -0.2, 0.2),
+                          rect_to_points(-0.1, 0.1, -0.1, 0.1))
+
+        for (ax, ay), (bx, by) in zip(got, expected):
+            self.assertAlmostEqual(ax, bx, places=9)
+            self.assertAlmostEqual(ay, by, places=9)
+
+
+class TestExcludeScreens(unittest.TestCase):
+
+    class _Sol:
+        def __init__(self, p, spread=1.0):
+            self.position = np.asarray(p, float)
+            self.position_spread_mm = spread
+
+    def _pit(self):
+        sols = {}
+        placed = []
+        plates = {}
+        base = 0
+
+        for n, origin in enumerate([(-0.16, 0.89, -0.49), (0.21, 0.90, -0.48),
+                                    (0.03, 0.69, -0.45)]):
+            pose = pose_to_matrix(origin, (-10.0, 0.0, 0.0))
+            for i, v in plate_local_points(PLATE_C).items():
+                sols[base + (i - 4)] = self._Sol(pose[:3, :3] @ v + pose[:3, 3])
+
+            plate = dict(PLATE_C)
+            plate["name"] = f"p{n}"
+            plate["unit_mm"] = {"w": 167.0, "h": 185.0}
+            plates[plate["name"]] = plate
+
+            got = place_from_plate(plate, {i: sols[base + (i - 4)] for i in PLATE_C["ids"]})
+            got.name = plate["name"]
+            placed.append(got)
+            base += 4
+
+        return placed, sols, plates
+
+    def _area(self, points):
+        n = len(points)
+        return abs(sum(points[i][0] * points[(i + 1) % n][1] -
+                       points[(i + 1) % n][0] * points[i][1] for i in range(n))) / 2.0
+
+    def test_screens_are_removed_from_the_outline(self):
+        placed, sols, plates = self._pit()
+
+        solid = shaped_cutout(placed, sols, viewpoint=(0.0, 1.1, -0.2))
+        holed = shaped_cutout(placed, sols, viewpoint=(0.0, 1.1, -0.2),
+                              exclude_screens=plates, screen_shrink_mm=0.0)
+
+        removed = self._area(solid.points) - self._area(holed.points)
+        one_screen = 0.11812 * 0.11781
+
+        self.assertAlmostEqual(removed, 3 * one_screen, delta=3 * one_screen * 0.05)
+        self.assertEqual(holed.dropped_holes, 0)
+
+    def test_shrink_leaves_error_on_the_bezel(self):
+        """
+        A hole pulled in means alignment error eats bezel, not screen. Which way to err is
+        not arbitrary: a little game over the bezel is invisible, a little camera over a
+        rendered display is not.
+        """
+        placed, sols, plates = self._pit()
+
+        tight = shaped_cutout(placed, sols, (0.0, 1.1, -0.2),
+                              exclude_screens=plates, screen_shrink_mm=0.0)
+        shrunk = shaped_cutout(placed, sols, (0.0, 1.1, -0.2),
+                               exclude_screens=plates, screen_shrink_mm=5.0)
+
+        self.assertGreater(self._area(shrunk.points), self._area(tight.points),
+                           "shrinking the holes must leave MORE passthrough")
+
+    def test_outline_stays_inside_the_config_cap(self):
+        from tracing.config_io import MAX_POINTS
+
+        placed, sols, plates = self._pit()
+        holed = shaped_cutout(placed, sols, (0.0, 1.1, -0.2), exclude_screens=plates)
+
+        self.assertLessEqual(len(holed.points), MAX_POINTS)
+        self.assertEqual(len(holed.points), 26, "8 outer plus three holes at 6 each")
 
 
 if __name__ == "__main__":

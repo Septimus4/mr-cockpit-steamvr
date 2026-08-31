@@ -38,7 +38,9 @@ from anchors.place import (
     shaped_cutout,
 )
 from anchors.solver import solve_markers
-from tracing.config_io import MAX_QUADS, DEFAULT_CONFIG_PATH, QuadConfig, read_quads, write_quad
+from tracing.config_io import (
+    DEFAULT_CONFIG_PATH, MAX_POINTS, MAX_QUADS, QuadConfig, read_quads, write_quad,
+)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLATES = os.path.join(ROOT, "PRINT-THESE", "plates")
@@ -220,6 +222,14 @@ def main():
                     help="grow every cutout by this many mm on all sides")
     ap.add_argument("--start", type=int, default=0,
                     help="first quad index to use, so earlier ones are left alone")
+    ap.add_argument("--exclude-screens", action="store_true",
+                    help="cut each MFD screen out of the outline, so the SIM draws the "
+                         "display and passthrough covers only the buttons. Implies "
+                         "--shaped.")
+    ap.add_argument("--screen-shrink", type=float, default=3.0,
+                    help="pull each screen hole in by this many mm (default 3). Alignment "
+                         "error then eats into the bezel instead of leaving a ring of "
+                         "camera over the screen edge.")
     ap.add_argument("--shaped", action="store_true",
                     help="ONE cutout whose OUTLINE follows the panels - a T for three "
                          "across and one below - instead of a rectangle around them.")
@@ -254,10 +264,13 @@ def main():
 
     placed, loose = placements(solutions, plates, a.margin)
 
-    if a.shaped:
+    if a.shaped or a.exclude_screens:
         head_now = head_frame(cameras)
         viewpoint = head_now[0] if head_now else np.array([0.0, 1.2, 0.0])
-        single = shaped_cutout(placed, solutions, viewpoint, a.margin)
+        by_name = {g["name"]: g for g in plates} if a.exclude_screens else None
+        single = shaped_cutout(placed, solutions, viewpoint, a.margin,
+                               exclude_screens=by_name,
+                               screen_shrink_mm=a.screen_shrink)
 
         if single is None:
             print("\n  Not enough solved markers to fit a common plane.")
@@ -272,6 +285,21 @@ def main():
               f"of the box.")
         print("  The rest of the box is cockpit side wall, and passthrough there would")
         print("  cover the game rather than reveal a control.")
+
+        if a.exclude_screens:
+            print()
+            print(f"  {len(placed)} screen(s) cut out, shrunk {a.screen_shrink:.0f} mm.")
+            print("  The sim draws the MFDs; passthrough covers only the buttons around")
+            print("  them. The shrink makes alignment error land on the bezel, where a")
+            print("  little game is invisible, rather than on the screen, where a little")
+            print("  camera is not.")
+
+            if single.dropped_holes:
+                print()
+                print(f"  {single.dropped_holes} screen hole(s) DROPPED - hit the point limit")
+                print(f"  the {MAX_POINTS}-point config limit. Those screens will be covered by")
+                print("  passthrough. Use --shaped without --exclude-screens, or place the")
+                print("  panels as separate cutouts.")
 
         placed = [single]
         loose = []
@@ -311,7 +339,7 @@ def main():
         return 1
 
     head = head_frame(cameras)
-    describe(placed, loose, solutions, head, single=bool(a.cover_all or a.shaped))
+    describe(placed, loose, solutions, head, single=bool(a.cover_all or a.shaped or a.exclude_screens))
 
     if head is not None:
         # An outlined cutout covers its polygon, not its bounding box, and the

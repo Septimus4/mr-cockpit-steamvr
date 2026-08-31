@@ -79,6 +79,10 @@ class CutoutPlacement:
         # from width/height, which is what the C++ falls back to as well.
         self.points = []
 
+        # Screen holes that would not fit the config's point cap. Reported rather than
+        # silently omitted: a missing hole puts passthrough over a rendered display.
+        self.dropped_holes = 0
+
     def __repr__(self):
         return (f"{self.name}: {np.round(self.position, 4)} "
                 f"rot {tuple(round(v, 2) for v in self.euler_deg)} "
@@ -415,12 +419,17 @@ def _drop_collinear(points, tolerance=1e-6):
     return out if len(out) >= 3 else points
 
 
-def shaped_cutout(placements, solutions, viewpoint, margin_mm=0.0):
+def shaped_cutout(placements, solutions, viewpoint, margin_mm=0.0,
+                  exclude_screens=None, screen_shrink_mm=0.0):
     """
     ONE cutout whose OUTLINE follows the panels, instead of a rectangle around them.
 
     The pose and plane are the same common fit `cover_all` uses; only the shape differs.
     Returns the placement with its outline in `points`, in the cutout's own plane.
+
+    `exclude_screens` is {plate name: plate}. When given, each panel's SCREEN is cut out
+    of the outline as a hole, so the sim draws the MFD and passthrough covers only the
+    buttons around it. `dropped_holes` records any that would not fit the 32-point budget.
     """
     pts = np.array([s.position for s in solutions.values()])
 
@@ -439,6 +448,12 @@ def shaped_cutout(placements, solutions, viewpoint, margin_mm=0.0):
     if len(outline) < 3:
         return None
 
+    dropped = 0
+
+    if exclude_screens is not None:
+        holes = screen_rects_in_plane(placements, exclude_screens, origin, r, screen_shrink_mm)
+        outline, dropped = outline_with_holes(outline, holes)
+
     xs = [p[0] for p in outline]
     ys = [p[1] for p in outline]
 
@@ -451,5 +466,137 @@ def shaped_cutout(placements, solutions, viewpoint, margin_mm=0.0):
     out = CutoutPlacement("cockpit", origin, matrix_to_euler_xyz(r),
                           max(xs) - min(xs), max(ys) - min(ys), ids, span_mm, spread)
     out.points = outline
+    out.dropped_holes = dropped
 
     return out
+
+
+def bridge_hole(outer, hole):
+    """
+    Cut a hole into an outline by bridging, so one closed loop describes both.
+
+    The config format and the C++ ear clipper both take a SINGLE loop - there is no
+    representation for a second contour. Bridging is the standard way round it: slit the
+    outer boundary open at the point nearest the hole, walk the hole the OTHER way round,
+    and come back along the same slit. The slit has zero width, so it draws nothing.
+
+    The winding must be opposite, or the hole adds area instead of removing it - and the
+    result would look like a slightly wrong shape rather than an obvious failure.
+
+    Costs the hole's points plus two, so a rectangular hole is six of the 32-point budget.
+    """
+    outer = list(outer)
+    hole = list(hole)
+
+    if len(outer) < 3 or len(hole) < 3:
+        return outer
+
+    if _signed_area(hole) * _signed_area(outer) > 0:
+        hole = hole[::-1]
+
+    # Bridge from the closest pair, which keeps the slit short and stops it crossing the
+    # shape - a slit through another part of the outline is a self-intersection, and the
+    # ear clipper rejects those outright.
+    best = None
+
+    for i, a in enumerate(outer):
+        for j, b in enumerate(hole):
+            d = (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+
+            if best is None or d < best[0]:
+                best = (d, i, j)
+
+    _, i, j = best
+
+    return (outer[:i + 1]
+            + hole[j:] + hole[:j + 1]
+            + outer[i:])
+
+
+def _signed_area(points):
+    n = len(points)
+
+    if n < 3:
+        return 0.0
+
+    return sum(points[k][0] * points[(k + 1) % n][1] -
+               points[(k + 1) % n][0] * points[k][1] for k in range(n)) / 2.0
+
+
+def outline_with_holes(outer, holes):
+    """
+    One loop describing `outer` minus every rectangle in `holes`.
+
+    Holes are added nearest-first so each bridge is as short as possible. A hole that
+    would push the outline past the config's point cap is DROPPED rather than truncated:
+    a truncated loop is not a polygon at all, and would draw as garbage or fall back to
+    the rectangle with nothing to say why.
+
+    Returns (points, dropped_count).
+    """
+    from tracing.config_io import MAX_POINTS
+
+    loop = list(outer)
+    dropped = 0
+
+    centre = (sum(p[0] for p in outer) / len(outer),
+              sum(p[1] for p in outer) / len(outer))
+
+    ordered = sorted(holes, key=lambda h: min((p[0] - centre[0]) ** 2 +
+                                              (p[1] - centre[1]) ** 2 for p in h))
+
+    for hole in ordered:
+        if len(loop) + len(hole) + 2 > MAX_POINTS:
+            dropped += 1
+            continue
+
+        loop = bridge_hole(loop, hole)
+
+    return loop, dropped
+
+
+def rect_to_points(xmin, xmax, ymin, ymax):
+    """A rectangle as four points, counter-clockwise."""
+    return [(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax)]
+
+
+def screen_rects_in_plane(placements, plates_by_name, origin, r, shrink_mm=0.0):
+    """
+    Each panel's SCREEN area projected into the common plane.
+
+    These become holes: the sim draws the MFD content, and passthrough over it would
+    replace a crisp rendered display with a camera photograph of a screen showing
+    something else entirely.
+
+    `shrink_mm` pulls each hole in, so alignment error eats into the bezel rather than
+    leaving a ring of passthrough over the screen edge. Which way to err is not
+    arbitrary - a little game over the bezel is invisible, a little camera over the screen
+    is not.
+    """
+    rects = []
+
+    for c in placements:
+        plate = plates_by_name.get(c.name)
+
+        if plate is None:
+            continue
+
+        u = plate["usable_mm"]
+        w_mm, h_mm, dx_mm, dy_mm = cutout_extent(plate)
+
+        # The screen sits where the unit's own offset says it does, mirrored: the unit was
+        # moved by (dx, dy) away from the screen, so the screen is that far back.
+        cx = -dx_mm / 1000.0
+        cy = -dy_mm / 1000.0
+        hw = max(u["w"] / 2.0 - shrink_mm, 1.0) / 1000.0
+        hh = max(u["h"] / 2.0 - shrink_mm, 1.0) / 1000.0
+
+        panel = euler_xyz_to_matrix(*c.euler_deg)
+        corners = np.array([[cx - hw, cy - hh, 0.0], [cx + hw, cy - hh, 0.0],
+                            [cx + hw, cy + hh, 0.0], [cx - hw, cy + hh, 0.0]])
+        world = corners @ panel.T + c.position
+        local = (world - origin) @ r
+
+        rects.append([(float(x), float(y)) for x, y in local[:, :2]])
+
+    return rects

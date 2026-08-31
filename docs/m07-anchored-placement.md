@@ -137,6 +137,35 @@ cross, L and a single row with no special cases, at four points per row — well
 the 32-point cap. Gaps between rows are closed, because an outline is one closed loop
 and cannot express two disconnected pieces.
 
+### The sim draws the MFDs, passthrough draws the buttons
+
+`--exclude-screens` cuts each panel's screen out of the outline as a hole. Passthrough of a
+real display is worse than the rendered version, and worse still when the real panel is
+showing ArUco markers rather than the sim's page.
+
+There is no second contour in the config format or in the C++ ear clipper, so one loop has
+to describe outer and holes both. **Bridging** does it: a zero-width slit from the outer
+boundary to the hole, the hole walked the OPPOSITE way round, and back along the same slit.
+The slit draws nothing, and the signed area comes out as outer minus holes — which is what
+lets the same area assertion verify it on both sides of the port.
+
+That cost one change in `mesh.cpp`. Bridging DUPLICATES vertices, the duplicates sit exactly
+on candidate ears' corners, and `PointInTriangle` counts the boundary as inside — so every
+ear looked blocked and the clipper gave up on a perfectly good outline. Coincident points
+are now skipped by position rather than by index.
+
+Budget: six points per rectangular hole. The real cockpit is **26 of 32** — 8 for the T plus
+three screens. A hole that will not fit is DROPPED and reported, never truncated: a
+truncated loop is not a polygon at all.
+
+`--screen-shrink` (3 mm by default) pulls each hole in so alignment error eats into the
+bezel rather than leaving a ring of camera over the screen edge. Which way to err is not
+arbitrary — a little game over the bezel is invisible, a little camera over a rendered
+display is not.
+
+Measured on the real capture: **1042 cm2**, against 1413 for the solid T and 2110 for the
+bounding box — 49% of the box.
+
 ### The centre console has no markers at all
 
 `--cover-all` puts ONE cutout over the whole assembly (530 x 430 mm by default), on the
@@ -170,6 +199,8 @@ Replays the last capture — no camera, no headset — and prints what it would 
 | `--start N` | first quad index, so earlier cutouts are left alone |
 | `--cover-all [WxH]` | one rectangle over the whole assembly, mm, default `530x430` |
 | `--shaped` | one cutout whose OUTLINE follows the panels — a T, not a box |
+| `--exclude-screens` | cut the MFD screens out, so the SIM draws them |
+| `--screen-shrink MM` | pull each screen hole in, default 3 mm |
 | `--config PATH` | write somewhere else — useful for testing |
 
 Sweep once with `scripts/solve_anchors.py`, then place as many times as you like.
