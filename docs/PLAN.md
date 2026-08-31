@@ -317,6 +317,27 @@ single biggest risk in the project right now: roughly 1000 lines of renderer cha
 only evidence of correctness is that they compile and that their pure-maths parts are
 tested.
 
+### DONE 2026-08-31 — the three display panels are characterised
+
+All three WinCtrl panels measured and saved to `PRINT-THESE/plates/`. No headset needed.
+
+| | |
+|---|---|
+| panel | 768 x 1024 px over 120.0 x 160.0 mm, 0.15625 mm/px |
+| usable | 118.1 x 117.8 mm - square, confirming the by-hand 12 x 12 cm reading |
+| inset | top 41.25 mm (the mount), 0.94 mm on the other three (the bezel) |
+| markers | 32.8 mm, spread 69 x 69 mm, aspect 1.004, self-detect 4/4 |
+| ids | 0-3, 4-7, 8-11 - verified unique across all three |
+
+Two things worth carrying forward. The obstruction HELPS: losing the top squares the
+usable area to 1.004:1, the best conditioning measured anywhere in this project. And
+32.8 mm markers on an emissive panel beat the 22.4 mm stickers on both size and surface,
+so every measurement in marker-size-measurements.md applies directly rather than
+optimistically.
+
+The ~1 mm bezel overlap on the other three edges is why an edge-to-edge ruler was
+invisible - the outermost pixels are under the bezel lip.
+
 ### 1. Hardware verification — do this first (needs the headset, ~45 min)
 
 Nothing else should be built on top of an unverified renderer.
