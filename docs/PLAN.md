@@ -143,6 +143,12 @@ per pixel, and the only interpolated value is a projective function of a positio
 varies affinely across a plane. An early default of 8 generated 128x the needed geometry
 for no benefit.
 
+**A cutout must be in view AND within camera coverage.** Two separate conditions, easily
+confused while testing. A quad at a fixed pose can be perfectly correct and still show
+nothing, because the head is turned away or because `ClampCameraFrame` has discarded it
+for lack of camera data. When a cutout does not appear, check the angle before suspecting
+the code.
+
 **Marker detection is the real cost, and needs a hard rule.** ArUco detection on a
 1600x1200 frame is typically 5-20 ms against an 11 ms budget at 90 Hz. It must NEVER run
 on the render thread. Drift and headset shift happen over seconds, so 5-10 Hz on a worker
@@ -215,9 +221,9 @@ nothing already built has to change for it.
 |----|-----------|--------|
 | M01 | Camera working (MF/SBS, 3200x1200@60) | done |
 | M02 | Build gate — self-built layer from source | done, DLL not yet registered/verified |
-| M03 | World quads, DX11 — rectangle, manual placement | done, **untested on hardware** |
+| M03 | World quads, DX11 — rectangle, manual placement | done, **verified on hardware** |
 | M04 | Vulkan parity | done, **untested on hardware** |
-| M05 | Arbitrary polygon cutouts | done, **untested on hardware** |
+| M05 | Arbitrary polygon cutouts | done, **verified on hardware** |
 | M06 | Anchor solve — bundle adjustment from markers | not started |
 | M07 | Anchor-driven pose + dynamic realignment | not started |
 | M08 | Setup UX | not started |
@@ -369,8 +375,8 @@ Nothing else should be built on top of an unverified renderer.
 - [x] ~~Enable one quad, confirm it appears~~ DONE
 - [x] ~~`Quads Only` ON~~ DONE - still need it OFF, to check alignment mode
 - [ ] **Nudge it in the menu** and confirm the pose updates live over IPC.
-- [ ] **Hand-write an outline** into `Quad0_Points` and confirm the shape follows it,
-      which is the only untested link between the config and the polygon mesh.
+- [x] ~~Hand-write an outline into `Quad0_Points`~~ DONE - the L renders. Config,
+      ear clipping, per-cutout mesh and the pose-only transform all verified on hardware.
 - [x] ~~Check the double-composite question~~ DONE - alignment mode composites cleanly,
       no artifact. The depth pass held in reserve is not needed.
 - [ ] **Note whether DCS and X-Plane submit depth.** The menu reports it per client. It
