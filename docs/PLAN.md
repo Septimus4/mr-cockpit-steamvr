@@ -338,17 +338,36 @@ optimistically.
 The ~1 mm bezel overlap on the other three edges is why an edge-to-edge ruler was
 invisible - the outermost pixels are under the bezel lip.
 
-### 1. Hardware verification — do this first (needs the headset, ~45 min)
+### DONE 2026-08-31 — M03 verified on hardware
+
+The self-built layer is installed at `C:\Users\William\openxr-steamvr-passthrough-cutouts`
+and loads. Custom2D behaves exactly as before, which proves the build itself before any
+new code is exercised. `Projection_WorldQuad` with `QuadsExclusive` draws a quad, and the
+quad is genuinely world-anchored.
+
+**The one surprise was not a bug.** A quad appears to be eaten from one side as the head
+turns - "the top right corner is anchored and the bottom left follows my view". That is
+`ClampCameraFrame` discarding pixels whose reprojection falls outside the camera image.
+The camera sees ~73 degrees, reduced further by `FieldOfViewScale = 0.91`, so:
+
+- look right -> the quad nears the LEFT edge of the camera frame -> clipped from the left
+- look up -> it nears the BOTTOM edge -> the visible bottom edge rises
+
+Confirmed by unchecking `Clamp Camera Frame`: the cropping is replaced by smearing, which
+is the other way of handling "no camera data here".
+
+It is invisible in Custom2D because the whole view is passthrough and the clipping happens
+at the edge of vision. A quad is a discrete object, so the eaten edge is obvious. In real
+use, cutouts sit on panels the pilot is looking at, near the centre of camera coverage.
+The limit is inherent to where the camera is; a cutout viewed very obliquely will clip.
+
+### 1. Remaining hardware verification (needs the headset)
 
 Nothing else should be built on top of an unverified renderer.
 
-- [ ] **Register the self-built layer** and confirm it loads. Completes the M02 gate,
-      which is still open. Compare behaviour against release 0.4.2 in a mode that has not
-      been touched (Custom2D) to prove the build itself is sound before testing new code.
-- [ ] **Enable one quad** by hand: `ProjectionMode = 3`, `Quad0_Enabled = true`,
-      `PosY` at seated eye height, `PosZ = -0.7`. Confirm it appears at all.
-- [ ] **Check `Quads Only` both ways.** Off, the cylinder should still cover the view;
-      on, passthrough should appear only inside the quad.
+- [x] ~~Register the self-built layer, verify Custom2D unchanged~~ DONE
+- [x] ~~Enable one quad, confirm it appears~~ DONE
+- [x] ~~`Quads Only` ON~~ DONE - still need it OFF, to check alignment mode
 - [ ] **Nudge it in the menu** and confirm the pose updates live over IPC.
 - [ ] **Hand-write an outline** into `Quad0_Points` and confirm the shape follows it,
       which is the only untested link between the config and the polygon mesh.
