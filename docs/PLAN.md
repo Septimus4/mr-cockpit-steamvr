@@ -474,6 +474,34 @@ Remaining:
 - [ ] re-solve periodically, low-pass filtered, to correct drift and headset shift
 - [ ] fall back to last-known pose when markers are not visible
 
+#### The runtime worker — what the layer already gives us
+
+Surveyed 2026-08-31, and the news is good on both counts that mattered.
+
+**Frame access is already there and already off the render thread.**
+`ICameraManager::AcquireCameraCPUFrame()` returns a `FramePtr<CameraCPUFrame>` from a
+`FrameQueue`, so a worker can pull frames without touching rendering at all. `CameraCPUFrame`
+carries `FrameBuffer` (CPU pixels), `FrameSize`, `FrameLayout`, `FrameSequence` and
+`FrameExposureTimestamp`.
+
+**And it carries `CameraViewToWorldLeft` — the pose AT EXPOSURE.** That is strictly better
+input than the Python tool has. `solve_anchors.py` reads the headset pose *now* against a
+USB frame buffered by tens of milliseconds, which is why it has to filter to near-stationary
+frames; a continuous sweep scattered 34 mm. The layer has already paired each frame with the
+pose it was taken at, so the worker should not need the hold-still trick at all.
+
+**ArUco is available**: `opencv-install/include/opencv2/objdetect/aruco_detector.hpp`, and the
+layer already links OpenCV for `camera_manager_opencv.cpp`.
+
+So the port is: `anchors/detect.py` -> detector + id/size map; `anchors/solver.py` -> PnP and
+robust averaging; `anchors/place.py` -> Kabsch fit and the outline. The 175 Python tests are
+the acceptance criteria, and the shared fixtures already pinned in `tests/test_mesh.cpp` are
+the pattern to follow for the rest.
+
+Still to decide: how the solved pose reaches the renderer. Writing the config would fight the
+menu (which overwrites it wholesale), so the live path should update `Config_Quad` in memory
+and let the menu observe it, not the other way round.
+
 - see [m07-anchored-placement.md](m07-anchored-placement.md)
 
 ### M08 — setup UX
