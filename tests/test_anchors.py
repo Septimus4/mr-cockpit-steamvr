@@ -21,7 +21,9 @@ from anchors.solver import (
     average_rotations, constellation_conditioning, is_coplanar, marker_object_points,
     solve_marker_pose, solve_markers,
 )
-from anchors.detect import detect_markers, is_diagnostic_id, make_detector, summarise
+from anchors.detect import (
+    detect_markers, is_diagnostic_id, make_detector, plate_size_overrides, summarise,
+)
 from anchors.synthetic import (
     arc_of_head_poses, marker_pose, observe, plate_markers, render_frame,
 )
@@ -401,6 +403,75 @@ class TestIdGuards(unittest.TestCase):
     def test_summary_mentions_what_was_skipped(self):
         text = summarise([], {32: "diagnostic id - a test sheet is in view"})
         self.assertIn("SKIPPED 32", text)
+
+
+class TestSizeOverrides(unittest.TestCase):
+    """
+    The id -> size map guarantees a PRINTED marker's size cannot be configured wrong. A
+    DISPLAY plate breaks that guarantee - it renders whatever size fits the panel.
+
+    This is not a small error. Measured on real cockpit data: ids 0-11 displayed at
+    32.8 mm but solved as the map's 22.4 mm came out 28% too close, and because each view
+    then placed the marker at the wrong distance along a DIFFERENT ray, the per-view
+    estimates scattered by 38 mm instead of simply being nearer.
+    """
+
+    def _scene(self, drawn_size):
+        markers = plate_markers((0.0, 1.05, -0.62), (-20.0, 0.0, 0.0), 69.0,
+                                [0, 1, 2, 3], drawn_size)
+        head = arc_of_head_poses((0.0, 0.0, -0.62), 0.62, 1)[0]
+        cam = camera_at(head)
+        frame, _ = render_frame(cam, markers, {i: drawn_size for i in markers})
+        return markers, cam, frame
+
+    def test_override_is_used_in_preference_to_the_id(self):
+        _, cam, frame = self._scene(32.8)
+
+        obs, _ = detect_markers(frame, cam, size_overrides={0: 32.8, 1: 32.8, 2: 32.8, 3: 32.8})
+        self.assertTrue(obs)
+        for o in obs:
+            self.assertAlmostEqual(o.size_mm, 32.8, places=3)
+
+    def test_without_the_override_the_scale_is_wrong(self):
+        """Guards the regression: this is what the real capture actually did."""
+        markers, cam, frame = self._scene(32.8)
+
+        obs, _ = detect_markers(frame, cam)          # id map says 22.4 mm
+        sols = solve_markers(obs, {0: cam})
+
+        p = np.array([sols[i].position for i in (0, 1, 2, 3)])
+        side = np.mean([np.linalg.norm(p[i] - p[(i + 1) % 4]) for i in range(4)]) * 1000.0
+
+        self.assertLess(side, 60.0,
+                        "without the override the plate should come out too small; if it "
+                        "does not, the id map or the plate size has changed")
+
+    def test_with_the_override_the_scale_is_right(self):
+        markers, cam, frame = self._scene(32.8)
+
+        obs, _ = detect_markers(frame, cam, size_overrides={i: 32.8 for i in range(4)})
+        sols = solve_markers(obs, {0: cam})
+
+        p = np.array([sols[i].position for i in (0, 1, 2, 3)])
+        side = np.mean([np.linalg.norm(p[i] - p[(i + 1) % 4]) for i in range(4)]) * 1000.0
+
+        self.assertAlmostEqual(side, 69.0, delta=3.0)
+
+    def test_overrides_are_read_from_display_plates_only(self):
+        """Sticker plates must NOT override - their size really does come from the id."""
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "plate-disp.json"), "w") as f:
+                json.dump({"kind": "display", "ids": [0, 1], "marker_mm": 32.8}, f)
+            with open(os.path.join(d, "plate-stick.json"), "w") as f:
+                json.dump({"kind": "sticker", "ids": [4, 5], "marker_mm": 22.4}, f)
+
+            out = plate_size_overrides(d)
+
+        self.assertEqual(sorted(out), [0, 1])
+        self.assertAlmostEqual(out[0], 32.8, places=3)
 
 
 if __name__ == "__main__":

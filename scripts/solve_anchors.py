@@ -25,7 +25,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from anchors.detect import detect_markers, make_detector
+from anchors.detect import detect_markers, make_detector, plate_size_overrides
 from anchors.solver import constellation_conditioning, is_coplanar, solve_markers
 from tracing.capture import hmd_matrix_to_numpy
 from tracing.geometry import Camera, camera_to_world_from_hmd
@@ -105,6 +105,13 @@ def main():
     from cam import open_elp
 
     detector = make_detector()
+
+    # Display panels render whatever marker size fits them, which the id cannot describe.
+    overrides = plate_size_overrides()
+    if overrides:
+        print("  display plate sizes: " +
+              ", ".join(f"{i}={overrides[i]:.1f}mm" for i in sorted(overrides)))
+
     vr = openvr.init(openvr.VRApplication_Background)
     cap = open_elp()
 
@@ -143,7 +150,8 @@ def main():
                                      CAMERA_OFFSET),
                                  image_size=(left.shape[1], left.shape[0]))
 
-                    got, rejected = detect_markers(left, cam, frame=frame, detector=detector)
+                    got, rejected = detect_markers(left, cam, frame=frame, detector=detector,
+                                                   size_overrides=overrides)
 
                     if got:
                         cameras[frame] = cam

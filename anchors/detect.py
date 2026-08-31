@@ -39,9 +39,51 @@ def make_detector(dictionary_name="DICT_4X4_50"):
     return cv2.aruco.ArucoDetector(d, cv2.aruco.DetectorParameters())
 
 
-def detect_markers(image, camera, frame=0, detector=None, allow_diagnostic=False):
+def plate_size_overrides(plates_dir=None):
+    """
+    Marker sizes declared by DISPLAY plates, as {id: size_mm}.
+
+    The id -> size map exists so a printed marker's size cannot be configured wrong. A
+    DISPLAY plate breaks that guarantee: it renders whatever size fits the panel, which is
+    not what the id says. Ignoring this is not a small error - solving a 32.8 mm marker as
+    22.4 mm shrinks every range by a third, and because each view then places the marker
+    at the wrong distance along a DIFFERENT ray, the estimates scatter instead of simply
+    being closer. Measured on real data: 28% scale error and 38 mm of per-view spread.
+    """
+    import glob
+    import json
+
+    if plates_dir is None:
+        plates_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "PRINT-THESE", "plates")
+
+    out = {}
+
+    for path in sorted(glob.glob(os.path.join(plates_dir, "plate-*.json"))):
+        try:
+            with open(path) as f:
+                g = json.load(f)
+        except (OSError, ValueError):
+            continue
+
+        if g.get("kind") != "display":
+            continue
+
+        for marker_id in g.get("ids", []):
+            out[int(marker_id)] = float(g["marker_mm"])
+
+    return out
+
+
+def detect_markers(image, camera, frame=0, detector=None, allow_diagnostic=False,
+                   size_overrides=None):
     """
     Find markers in one frame and return (observations, rejected).
+
+    `size_overrides` maps an id to its true physical size, for markers whose size the id
+    cannot describe - display panels, which render whatever fits. See
+    plate_size_overrides.
 
     `rejected` maps a marker id to why it was skipped, so a marker that is seen but not
     used can be reported rather than silently dropped - "I stuck it on and nothing
@@ -69,7 +111,10 @@ def detect_markers(image, camera, frame=0, detector=None, allow_diagnostic=False
             rejected[marker_id] = "diagnostic id - a test sheet is in view"
             continue
 
-        size_mm = size_of(marker_id)
+        size_mm = (size_overrides or {}).get(marker_id)
+
+        if size_mm is None:
+            size_mm = size_of(marker_id)
 
         if size_mm is None:
             rejected[marker_id] = "id has no size class, so its scale is unknown"
