@@ -33,7 +33,9 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from anchors.probe import fit_pivot, outline_from_touches, pivot_conditioning, tip_position
+from anchors.probe import (
+    fit_pivot, outline_from_touches, pivot_conditioning, pivot_uncertainty, tip_position,
+)
 from tracing.capture import hmd_matrix_to_numpy
 from tracing.config_io import DEFAULT_CONFIG_PATH, MAX_QUADS, QuadConfig, read_quads, write_quad
 
@@ -192,10 +194,13 @@ def calibrate_tip(vr, index):
             last_report = time.time()
             spread, verdict = pivot_conditioning(poses)
             tip, _, residual = fit_pivot(poses)
-            print(f"\r  {len(poses):4d} samples  spread {spread:5.1f} deg {verdict:9}"
-                  f"  wobble {residual * 1000:5.2f} mm   ", end="", flush=True)
+            sigma = pivot_uncertainty(poses, residual)
+            worst = np.max(sigma) * 1000 if np.all(np.isfinite(sigma)) else float("inf")
 
-            if verdict == "GOOD" and residual < 0.004 and len(poses) > 120:
+            print("\r  %4d samples  spread %5.1f deg %-9s wobble %5.2f mm  tip +/- %6.2f mm   "
+                  % (len(poses), spread, verdict, residual * 1000, worst), end="", flush=True)
+
+            if worst < 1.5 and residual < 0.004 and len(poses) > 120:
                 print("\n\n  Enough. Release the trigger.")
                 break
 
@@ -232,7 +237,13 @@ def calibrate_tip(vr, index):
     with open(TIP_FILE, "w") as f:
         json.dump({"tip_offset_m": [float(v) for v in tip],
                    "wobble_mm": round(residual * 1000, 3),
-                   "spread_deg": round(spread, 1)}, f, indent=2)
+                   "sigma_mm": [round(float(v) * 1000, 3) for v in sigma],
+                   "spread_deg": round(spread, 1),
+                   "samples": len(poses),
+                   # Kept so the calibration can be re-analysed - or re-solved under a
+                   # better method - without asking for the pivot to be done again.
+                   "poses": [[float(v) for v in m.reshape(16)] for m in poses]},
+                  f, indent=2)
         f.write("\n")
 
     print(f"\n  Saved to {TIP_FILE}")

@@ -45,13 +45,34 @@ That is linear in both, so it is a least-squares solve rather than an optimisati
 Two guards, because the obvious one is not enough:
 
 - **wobble** — the RMS residual, i.e. how far the tip actually moved. Rejected above 4 mm.
-- **conditioning** — rotating about a single axis fits the data *perfectly* and still
-  leaves the offset free along that axis. The wobble looks excellent and every later point
-  is wrong by a constant, so rotation spread is checked separately and `TOO FLAT` refused.
+- **uncertainty** — the per-axis standard error of the tip offset, from the least-squares
+  covariance. Rejected above 3 mm on any axis.
+
+The second is the one that matters, and the wobble cannot substitute for it. Rotating
+about a single axis fits the data *perfectly* — the wobble stays small — while leaving the
+tip's component along that axis confounded with the pivot centre's. No amount of extra
+data determines it, and every point measured afterwards is wrong by the same constant with
+nothing to show for it. The standard error goes to infinity there; the wobble does not
+move.
+
+It must be a real matrix inverse, not a pseudo-inverse: `pinv` truncates small singular
+values and so reports an unconstrained direction as having *zero* variance — turning the
+worst axis into the apparent best one.
+
+Measured on this rig: a wide pivot lands under 1 mm per axis, a 12-degree one around
+0.9 mm, and a single-axis pivot correctly reports infinity.
+
+The raw poses are saved alongside the result, so a calibration can be re-analysed — or
+re-solved by a better method — without asking for the pivot to be done again.
 
 ## Measuring
 
     python scripts/touch_cutouts.py
+
+**Touch with the same part of the controller you pivoted on.** The calibration measures
+whatever point you planted, not some canonical "tip" — so if you rested it on the base
+during calibration, measure with the base. Using a different part shifts every point by
+the distance between them.
 
 | control | action |
 |---|---|

@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from anchors.probe import (
     fit_pivot, level_frame, outline_from_touches, pivot_conditioning, plane_from_touches,
-    tip_position,
+    pivot_uncertainty, tip_position,
 )
 from tracing.geometry import euler_xyz_to_matrix
 
@@ -287,6 +287,78 @@ class TestTipErrorIsSystematic(unittest.TestCase):
 
         self.assertAlmostEqual(bad.flatness_mm, good.flatness_mm, places=6,
                                msg="and no residual gives it away - hence pivot_conditioning")
+
+
+class TestPivotUncertainty(unittest.TestCase):
+    """
+    How well the pivot actually pinned the tip down, per axis.
+
+    This is the real guard, and the wobble is not. A pivot turned about ONE axis fits the
+    data perfectly and keeps a small wobble, while leaving the offset free along that axis
+    - so every point measured afterwards is wrong by the same constant, with nothing to
+    show for it.
+    """
+
+    TIP = np.array([0.0, -0.018, 0.031])
+    CENTRE = np.array([0.1, 0.9, -0.5])
+
+    def _poses(self, axes, n=200, noise=0.002, span=40.0, seed=1):
+        rng = np.random.default_rng(seed)
+        out = []
+
+        for _ in range(n):
+            euler = [rng.uniform(-span, span) if i in axes else 0.0 for i in range(3)]
+            r = euler_xyz_to_matrix(*euler)
+
+            m = np.eye(4)
+            m[:3, :3] = r
+            m[:3, 3] = self.CENTRE - r @ self.TIP + rng.normal(scale=noise, size=3)
+            out.append(m)
+
+        return out
+
+    def test_a_good_pivot_is_sub_millimetre(self):
+        poses = self._poses((0, 1, 2))
+        _, _, residual = fit_pivot(poses)
+
+        self.assertLess(float(np.max(pivot_uncertainty(poses, residual))) * 1000.0, 1.0)
+
+    def test_a_single_axis_pivot_is_unbounded(self):
+        """
+        The case the wobble check cannot see. Rotating about X leaves the tip's X
+        component confounded with the pivot centre's, so no amount of data determines it.
+        """
+        poses = self._poses((0,))
+        _, _, residual = fit_pivot(poses)
+
+        self.assertLess(residual * 1000.0, 4.0, "the wobble looks fine, which is the trap")
+        self.assertFalse(np.all(np.isfinite(pivot_uncertainty(poses, residual))))
+
+    def test_narrow_rotation_is_worse_than_wide(self):
+        wide = self._poses((0, 1, 2), span=40.0)
+        narrow = self._poses((0, 1, 2), span=12.0)
+
+        _, _, rw = fit_pivot(wide)
+        _, _, rn = fit_pivot(narrow)
+
+        self.assertGreater(float(np.max(pivot_uncertainty(narrow, rn))),
+                           float(np.max(pivot_uncertainty(wide, rw))))
+
+    def test_it_scales_with_wobble(self):
+        """Twice the hand tremor, twice the uncertainty - nothing else changed."""
+        steady = self._poses((0, 1, 2), noise=0.001, seed=4)
+        shaky = self._poses((0, 1, 2), noise=0.002, seed=4)
+
+        _, _, rs = fit_pivot(steady)
+        _, _, rk = fit_pivot(shaky)
+
+        ratio = (float(np.max(pivot_uncertainty(shaky, rk)))
+                 / float(np.max(pivot_uncertainty(steady, rs))))
+
+        self.assertAlmostEqual(ratio, 2.0, delta=0.25)
+
+    def test_too_few_poses_is_unbounded(self):
+        self.assertFalse(np.all(np.isfinite(pivot_uncertainty([np.eye(4)] * 2, 0.001))))
 
 
 if __name__ == "__main__":

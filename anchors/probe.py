@@ -68,6 +68,51 @@ def fit_pivot(poses):
     return tip, centre, residual
 
 
+def pivot_uncertainty(poses, residual):
+    """
+    How well the pivot actually pinned the tip down, per axis, in metres.
+
+    This is what `pivot_conditioning` was a proxy for, and it is strictly better. The
+    least-squares covariance is sigma^2 * (A'A)^-1, so a direction the rotation never
+    explored comes back with a huge standard error while the residual stays small - which
+    is exactly the failure that a wobble check alone cannot see.
+
+    Returns the per-axis standard error of the tip offset. Being told "this axis is
+    determined to 0.4 mm and that one to 30 mm" is far more useful than a verdict.
+    """
+    poses = [np.asarray(m, float).reshape(4, 4) for m in poses]
+
+    if len(poses) < 3:
+        return np.full(3, np.inf)
+
+    a = np.zeros((3 * len(poses), 6))
+
+    for i, m in enumerate(poses):
+        a[3 * i:3 * i + 3, :3] = m[:3, :3]
+        a[3 * i:3 * i + 3, 3:] = -np.eye(3)
+
+    rows = 3 * len(poses)
+
+    if rows <= 6:
+        return np.full(3, np.inf)
+
+    # A genuine inverse, NOT a pseudo-inverse. pinv truncates small singular values, which
+    # sets the variance of an unconstrained direction to zero - so a pivot rotated about
+    # one axis would report its worst axis as its BEST one. The whole point here is to let
+    # that direction blow up.
+    try:
+        covariance = np.linalg.inv(a.T @ a)
+    except np.linalg.LinAlgError:
+        return np.full(3, np.inf)
+
+    # residual is RMS over all rows; the unbiased estimate corrects for the 6 fitted
+    # parameters.
+    sigma = float(residual) * np.sqrt(rows / (rows - 6.0))
+    variance = np.clip(np.diag(covariance)[:3], 0.0, None)
+
+    return sigma * np.sqrt(variance)
+
+
 def pivot_conditioning(poses):
     """
     Whether a pivot calibration was rotated enough to determine the tip offset.
