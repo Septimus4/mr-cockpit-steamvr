@@ -371,9 +371,8 @@ Nothing else should be built on top of an unverified renderer.
 - [ ] **Nudge it in the menu** and confirm the pose updates live over IPC.
 - [ ] **Hand-write an outline** into `Quad0_Points` and confirm the shape follows it,
       which is the only untested link between the config and the polygon mesh.
-- [ ] **Check the double-composite question** flagged in m03: in alignment mode the
-      cylinder and the quad both draw. If the quad region looks brighter or wrong rather
-      than merely misaligned, that is the cause and it needs a depth pass.
+- [x] ~~Check the double-composite question~~ DONE - alignment mode composites cleanly,
+      no artifact. The depth pass held in reserve is not needed.
 - [ ] **Note whether DCS and X-Plane submit depth.** The menu reports it per client. It
       decides whether occlusion works, and it is a five-minute check.
 

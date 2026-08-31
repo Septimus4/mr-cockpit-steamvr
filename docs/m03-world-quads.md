@@ -102,6 +102,22 @@ Rotation is Euler degrees rather than a quaternion because until the marker solv
 these are placed by hand-editing the ini, and degrees are the only form a person can
 reason about. When the solver writes poses back it must use the same convention.
 
+## Verified on hardware 2026-08-31
+
+- the layer loads; Custom2D is unchanged, proving the build before new code is exercised
+- `QuadsExclusive` draws a world-anchored quad
+- pose edits stream over IPC and move the quad immediately
+- **alignment mode composites cleanly** - the cylinder and the quad overlapping produces
+  no brightness or contrast artifact, so the depth pass held in reserve is not needed.
+  This was flagged as a risk and is now closed.
+
+Moving a quad in alignment mode makes it visibly disagree with the cylinder in parallax,
+because the two sit at different depths. That is the effect the mode exists to correct,
+not a defect.
+
+**A quad being eaten from one side as the head turns is `ClampCameraFrame`,** discarding
+pixels whose reprojection falls outside the camera image - not a bug. See PLAN.md.
+
 ## Known limitations
 
 - **DX11 only.** The Vulkan renderer is untouched, so quad mode will not work there.
