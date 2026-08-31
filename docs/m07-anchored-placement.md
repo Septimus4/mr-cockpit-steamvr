@@ -154,6 +154,22 @@ on candidate ears' corners, and `PointInTriangle` counts the boundary as inside 
 ear looked blocked and the clipper gave up on a perfectly good outline. Coincident points
 are now skipped by position rather than by index.
 
+A bridge must be able to REACH its hole. Picking the nearest vertex pair is not enough -
+once one hole is bridged the loop contains hole vertices and bridge segments, and the next
+hole bridges across them. Candidates are therefore tried nearest-first and the first one
+whose slit crosses nothing wins.
+
+"Crosses nothing" means PROPERLY crosses. A bridged outline is full of touching segments
+by construction, since every bridge shares an endpoint with the contour it leaves. An
+earlier over-strict rule counted touching as crossing, reported 18 self-intersections in a
+perfectly valid cockpit outline, and would have made every candidate bridge look blocked -
+silently dropping the hole and leaving the screen under camera video.
+
+The real 26-point outline is now pinned in BOTH suites: checked for self-intersection in
+Python, and run through the shipping `MeshCreatePolygon` in
+`rectus/src/tests/real_outline.inl`. Synthetic fixtures are symmetric and forgiving; this
+one is neither, and it is the shape that actually gets loaded.
+
 Budget: six points per rectangular hole. The real cockpit is **26 of 32** — 8 for the T plus
 three screens. A hole that will not fit is DROPPED and reported, never truncated: a
 truncated loop is not a polygon at all.

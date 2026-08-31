@@ -9,7 +9,7 @@ a headset on is slow enough that it would not get done.
     cd mr-cockpit-steamvr
     .venv\Scripts\python.exe -m unittest discover -s tests
 
-175 tests, ~0.6 s.
+185 tests, ~1.0 s.
 
 | file | area |
 |------|------|
@@ -24,7 +24,7 @@ a headset on is slow enough that it would not get done.
     tests
 un_tests.bat
 
-59 checks, builds `mesh.cpp` standalone against the project's own headers.
+62 checks, builds `mesh.cpp` standalone against the project's own headers.
 
 **These exist because the Python suite validates a PORT of the ear-clipping algorithm.**
 That catches design errors but cannot catch a transcription error between the two, and

@@ -494,23 +494,76 @@ def bridge_hole(outer, hole):
     if _signed_area(hole) * _signed_area(outer) > 0:
         hole = hole[::-1]
 
-    # Bridge from the closest pair, which keeps the slit short and stops it crossing the
-    # shape - a slit through another part of the outline is a self-intersection, and the
-    # ear clipper rejects those outright.
-    best = None
+    # The bridge must be able to REACH the hole without crossing anything - the closest
+    # pair of vertices very often cannot.
+    #
+    # This was a real failure, not a theoretical one. Choosing purely by distance produced
+    # an outline with 18 self-intersections on the actual cockpit, because once the first
+    # hole is bridged the loop contains hole vertices and bridge segments, and the second
+    # hole then bridges across them. The ear clipper rejected it and the layer fell back to
+    # a rectangle - which covered every screen with camera video and looked merely like the
+    # cutout being the wrong size.
+    #
+    # So candidates are tried nearest-first and the first VISIBLE one wins. n is at most 32,
+    # so being thorough here costs nothing worth measuring.
+    candidates = sorted(
+        ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2, i, j)
+        for i, a in enumerate(outer) for j, b in enumerate(hole))
 
-    for i, a in enumerate(outer):
-        for j, b in enumerate(hole):
-            d = (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+    for _, i, j in candidates:
+        if _bridge_is_clear(outer[i], hole[j], outer, hole):
+            return (outer[:i + 1]
+                    + hole[j:] + hole[:j + 1]
+                    + outer[i:])
 
-            if best is None or d < best[0]:
-                best = (d, i, j)
+    return outer
 
-    _, i, j = best
 
-    return (outer[:i + 1]
-            + hole[j:] + hole[:j + 1]
-            + outer[i:])
+def _segments_cross(a, b, c, d):
+    """
+    Whether segments ab and cd cross PROPERLY - touching does not count.
+
+    All four orientations must be non-zero. A zero means an endpoint lies ON the other
+    segment, which is touching, not crossing, and a bridged outline is full of those by
+    construction: every bridge endpoint is shared with the contour it leaves from.
+
+    Treating a shared endpoint as a crossing is not a harmless over-caution. It makes
+    every candidate bridge look blocked, so the hole is silently dropped and the screen
+    ends up covered with camera video.
+    """
+    def side(p, q, r):
+        v = (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+        return 0 if abs(v) < 1e-12 else (1 if v > 0 else -1)
+
+    o1, o2 = side(a, b, c), side(a, b, d)
+    o3, o4 = side(c, d, a), side(c, d, b)
+
+    if 0 in (o1, o2, o3, o4):
+        return False
+
+    return o1 != o2 and o3 != o4
+
+
+def _bridge_is_clear(a, b, outer, hole):
+    """
+    Whether the slit from `a` to `b` crosses any edge of either contour.
+
+    Edges touching the bridge's own endpoints are skipped: they meet it, they do not cross
+    it, and treating a shared endpoint as a crossing would reject every possible bridge.
+    """
+    for contour in (outer, hole):
+        n = len(contour)
+
+        for k in range(n):
+            p, q = contour[k], contour[(k + 1) % n]
+
+            if p in (a, b) or q in (a, b):
+                continue
+
+            if _segments_cross(a, b, p, q):
+                return False
+
+    return True
 
 
 def _signed_area(points):

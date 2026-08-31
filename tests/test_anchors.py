@@ -21,10 +21,11 @@ from anchors.camera_rig import (
     CAMERA_OFFSET, CAMERA_OFFSET_LEGACY, apply_offset_delta, offset_delta,
 )
 from anchors.place import (
-    banded_outline, bridge_hole, cover_all, cutout_extent, fit_plane_frame,
-    fit_rigid, flattening_cost_mm, group_by_plate, orient_frame_towards,
-    outline_with_holes, panel_rects_in_plane, place_from_markers, place_from_plate,
-    plate_local_points, rect_to_points, shaped_cutout,
+    _segments_cross, banded_outline, bridge_hole, cover_all, cutout_extent,
+    fit_plane_frame, fit_rigid, flattening_cost_mm, group_by_plate,
+    orient_frame_towards, outline_with_holes, panel_rects_in_plane,
+    place_from_markers, place_from_plate, plate_local_points, rect_to_points,
+    shaped_cutout,
 )
 from anchors.solver import (
     average_rotations, constellation_conditioning, is_coplanar, marker_object_points,
@@ -1324,6 +1325,167 @@ class TestExcludeScreens(unittest.TestCase):
 
         self.assertLessEqual(len(holed.points), MAX_POINTS)
         self.assertEqual(len(holed.points), 26, "8 outer plus three holes at 6 each")
+
+
+class TestSegmentCrossing(unittest.TestCase):
+    """
+    Whether two segments cross PROPERLY. Touching is not crossing.
+
+    This looks like a triviality and is not. A bridged outline is full of touching
+    segments by construction - every bridge shares an endpoint with the contour it leaves
+    from - so a test that counts touching as crossing calls every candidate bridge
+    blocked. The hole is then silently dropped and the MFD screen ends up covered with
+    camera video.
+
+    It cost real time: an earlier version of this rule reported 18 self-intersections in a
+    perfectly valid cockpit outline, and sent the search for the bug in the wrong
+    direction entirely.
+    """
+
+    def test_a_real_crossing(self):
+        self.assertTrue(_segments_cross((0, 0), (1, 1), (0, 1), (1, 0)))
+
+    def test_shared_endpoint_is_not_a_crossing(self):
+        self.assertFalse(_segments_cross((0, 0), (1, 0), (1, 0), (1, 1)))
+        self.assertFalse(_segments_cross((0, 0), (1, 0), (0, 0), (0, 1)))
+
+    def test_endpoint_touching_mid_segment_is_not_a_crossing(self):
+        """A T-junction. The bridge endpoint lands ON a contour edge and stops there."""
+        self.assertFalse(_segments_cross((0, 0), (2, 0), (1, 0), (1, 1)))
+
+    def test_collinear_overlap_is_not_a_crossing(self):
+        """The out and back halves of a zero-width slit are exactly this."""
+        self.assertFalse(_segments_cross((0, 0), (2, 0), (0, 0), (2, 0)))
+        self.assertFalse(_segments_cross((0, 0), (2, 0), (2, 0), (0, 0)))
+
+    def test_disjoint_segments(self):
+        self.assertFalse(_segments_cross((0, 0), (1, 0), (0, 5), (1, 5)))
+
+
+def _proper_crossings(points):
+    """Every pair of non-adjacent edges that properly cross."""
+    n = len(points)
+    out = []
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if j == i + 1 or (i == 0 and j == n - 1):
+                continue
+
+            if _segments_cross(points[i], points[(i + 1) % n],
+                               points[j], points[(j + 1) % n]):
+                out.append((i, j))
+
+    return out
+
+
+class TestRealCockpitOutline(unittest.TestCase):
+    """
+    The outline the ACTUAL cockpit produces, from the real capture.
+
+    Synthetic fixtures are symmetric and forgiving; this one is neither, and it is the
+    shape that actually gets loaded. A self-intersecting outline is rejected by the ear
+    clipper and the layer falls back to a RECTANGLE - which covers every screen with
+    camera video and looks merely like the cutout being the wrong size.
+
+    The same 26 points are compiled into rectus tests/real_outline.inl and checked against
+    the shipping MeshCreatePolygon, so this and that must agree.
+    """
+
+    def setUp(self):
+        import glob
+        import json
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        capture = os.path.join(root, "captures", "anchors.npz")
+
+        if not os.path.exists(capture):
+            self.skipTest("no capture to replay")
+
+        from anchors.camera_rig import apply_offset_delta
+
+        z = np.load(capture, allow_pickle=True)
+        cameras = {int(k): v for k, v in zip(z["frames"], z["cameras"])}
+        cameras, _ = apply_offset_delta(
+            cameras, z["camera_offset"] if "camera_offset" in z.files else None)
+
+        self.solutions = solve_markers(list(z["observations"]), cameras)
+
+        self.plates = {}
+        for path in sorted(glob.glob(os.path.join(root, "PRINT-THESE", "plates",
+                                                  "plate-*.json"))):
+            with open(path) as f:
+                g = json.load(f)
+            if g.get("kind") == "display":
+                self.plates[g["name"]] = g
+
+        self.placed = []
+        for g in self.plates.values():
+            c = place_from_plate(g, self.solutions)
+            if c is not None:
+                c.name = g["name"]
+                self.placed.append(c)
+
+    def test_outline_does_not_self_intersect(self):
+        got = shaped_cutout(self.placed, self.solutions, (0.0, 1.1, -0.2),
+                            exclude_screens=self.plates, screen_shrink_mm=3.0)
+
+        self.assertEqual(_proper_crossings(got.points), [],
+                         "a self-intersecting outline draws as a rectangle over the screens")
+
+    def test_the_solid_T_does_not_self_intersect(self):
+        got = shaped_cutout(self.placed, self.solutions, (0.0, 1.1, -0.2))
+
+        self.assertEqual(_proper_crossings(got.points), [])
+        self.assertEqual(len(got.points), 8)
+
+    def test_no_screen_is_silently_dropped(self):
+        got = shaped_cutout(self.placed, self.solutions, (0.0, 1.1, -0.2),
+                            exclude_screens=self.plates, screen_shrink_mm=3.0)
+
+        self.assertEqual(got.dropped_holes, 0)
+        self.assertEqual(len(got.points), 26, "8 for the T plus three screens at 6 each")
+
+    def test_holes_remove_the_screen_area(self):
+        solid = shaped_cutout(self.placed, self.solutions, (0.0, 1.1, -0.2))
+        holed = shaped_cutout(self.placed, self.solutions, (0.0, 1.1, -0.2),
+                              exclude_screens=self.plates, screen_shrink_mm=3.0)
+
+        def area(points):
+            n = len(points)
+            return abs(sum(points[i][0] * points[(i + 1) % n][1] -
+                           points[(i + 1) % n][0] * points[i][1] for i in range(n))) / 2.0
+
+        removed = area(solid.points) - area(holed.points)
+
+        self.assertAlmostEqual(removed, 3 * 0.01236, delta=0.002)
+
+    def test_matches_the_cpp_fixture(self):
+        """
+        rectus tests/real_outline.inl is generated from this and run through the SHIPPING
+        MeshCreatePolygon. If they drift apart, the C++ test stops testing what runs.
+        """
+        inl = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))), "rectus", "src", "tests", "real_outline.inl")
+
+        if not os.path.exists(inl):
+            self.skipTest("rectus checkout not present")
+
+        import re
+
+        with open(inl) as f:
+            text = f.read()
+
+        pairs = re.findall(r"([-+][0-9.]+)f,\s*([-+][0-9.]+)f", text)
+        got = shaped_cutout(self.placed, self.solutions, (0.0, 1.1, -0.2),
+                            exclude_screens=self.plates, screen_shrink_mm=3.0)
+
+        self.assertEqual(len(pairs), len(got.points),
+                         "regenerate real_outline.inl - it has drifted from the Python")
+
+        for (sx, sy), (x, y) in zip(pairs, got.points):
+            self.assertAlmostEqual(float(sx), x, places=5)
+            self.assertAlmostEqual(float(sy), y, places=5)
 
 
 if __name__ == "__main__":
