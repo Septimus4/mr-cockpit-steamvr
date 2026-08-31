@@ -23,7 +23,7 @@ spec sheet.
          s        save geometry      r  reset
          ESC/q    close
 """
-import sys, os, argparse, json
+import sys, os, argparse, json, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dpi import make_dpi_aware, monitors
 MODE = make_dpi_aware()
@@ -153,7 +153,7 @@ else:
         sys.exit(f"  invalid plate: {msg}")
     t_, r_, b_, l_ = [float(v) for v in a.inset.split(",")]
     ST = dict(top=t_, right=r_, bottom=b_, left=l_,
-              mk=a.marker_mm or 0.0, bg=a.bg, edge=0, showText=True)
+              mk=a.marker_mm or 0.0, bg=a.bg, edge=0, showText=True, savedAt=0.0)
 
 
 def build():
@@ -240,6 +240,10 @@ def build():
         else:
             cv2.putText(page, "h for info", (px(ux0 + 2), px((band_top + band_bot) / 2)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.40, (60, 60, 60), 1)
+
+    if time.time() - ST["savedAt"] < 2.5:
+        cv2.putText(page, "SAVED", (px(ux0 + 4), px(uy0 + uh / 2)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.4, (20, 160, 20), 3)
 
     geom = dict(name=a.name or f"panel{a.monitor}", kind="display", monitor=a.monitor,
                 panel_px=[mon["w"], mon["h"]],
@@ -336,6 +340,8 @@ def key(e):
             os.makedirs("PRINT-THESE/plates", exist_ok=True)
             p = f"PRINT-THESE/plates/plate-{g['name']}.json"
             json.dump(g, open(p, "w"), indent=2)
+            ST["savedAt"] = time.time()
+            redraw()
             print(f"  saved {p}")
             print(f"    usable {g['usable_mm']}  marker {g['marker_mm']} mm  "
                   f"{g['aspect']}:1 {g['verdict']}")
