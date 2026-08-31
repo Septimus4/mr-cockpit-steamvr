@@ -57,16 +57,60 @@ def menu_is_running():
     return MENU_PROCESS.lower() in out.stdout.lower() if out.returncode == 0 else None
 
 
-def find_controllers(vr):
+def survey(vr):
+    """
+    Everything SteamVR knows about, and whether it is actually usable.
+
+    Reported rather than assumed, because "registered" and "tracking" are different
+    things: a controller that is switched off still appears in the device list with its
+    model name, and polling it forever looks like the tool hanging.
+    """
     import openvr
 
-    out = []
+    names = {openvr.TrackedDeviceClass_HMD: "HMD",
+             openvr.TrackedDeviceClass_Controller: "controller",
+             openvr.TrackedDeviceClass_GenericTracker: "tracker",
+             openvr.TrackedDeviceClass_TrackingReference: "base station"}
+
+    poses = vr.getDeviceToAbsoluteTrackingPose(
+        openvr.TrackingUniverseStanding, 0, openvr.k_unMaxTrackedDeviceCount)
+
+    rows = []
 
     for i in range(openvr.k_unMaxTrackedDeviceCount):
-        if vr.getTrackedDeviceClass(i) == openvr.TrackedDeviceClass_Controller:
-            out.append(i)
+        kind = vr.getTrackedDeviceClass(i)
 
-    return out
+        if kind == openvr.TrackedDeviceClass_Invalid:
+            continue
+
+        rows.append({
+            "index": i,
+            "kind": names.get(kind, str(kind)),
+            "model": vr.getStringTrackedDeviceProperty(i, openvr.Prop_ModelNumber_String),
+            "connected": bool(vr.isTrackedDeviceConnected(i)),
+            "tracking": bool(poses[i].bPoseIsValid),
+        })
+
+    return rows
+
+
+def find_controllers(vr, require_tracking=True):
+    """Usable controllers or trackers, most-usable first."""
+    rows = [r for r in survey(vr) if r["kind"] in ("controller", "tracker")]
+
+    if require_tracking:
+        rows = [r for r in rows if r["tracking"]]
+
+    return [r["index"] for r in rows]
+
+
+def report_survey(vr):
+    print("\n  SteamVR devices:")
+
+    for r in survey(vr):
+        state = ("tracking" if r["tracking"]
+                 else ("connected, not tracking" if r["connected"] else "NOT CONNECTED"))
+        print(f"    {r['index']:2d}  {r['kind']:13} {r['model']:16} {state}")
 
 
 class Buttons:
@@ -87,16 +131,34 @@ class Buttons:
 
 
 def read_controller(vr, index):
-    """(pose_4x4 or None, button mask)."""
+    """
+    (pose_4x4 or None, button mask).
+
+    getControllerStateWithPose pairs the buttons with the pose AT THE MOMENT THE BUTTON
+    CHANGED, which is what a "touch this corner" tool wants - the hand is already moving
+    away by the time the press is polled. It needs SteamVR's legacy input, though, so
+    there is a fall back to reading the two separately.
+    """
     import openvr
 
-    ok, state, pose = vr.getControllerStateWithPose(
-        openvr.TrackingUniverseStanding, index, openvr.k_unMaxTrackedDeviceCount)
+    got = vr.getControllerStateWithPose(openvr.TrackingUniverseStanding, index)
 
-    if not ok or not pose.bPoseIsValid:
+    if got is not None:
+        ok, state, pose = got
+
+        if ok and pose.bPoseIsValid:
+            return hmd_matrix_to_numpy(pose.mDeviceToAbsoluteTracking), state.ulButtonPressed
+
+    poses = vr.getDeviceToAbsoluteTrackingPose(
+        openvr.TrackingUniverseStanding, 0, openvr.k_unMaxTrackedDeviceCount)
+
+    if not poses[index].bPoseIsValid:
         return None, 0
 
-    return hmd_matrix_to_numpy(pose.mDeviceToAbsoluteTracking), state.ulButtonPressed
+    ok, state = vr.getControllerState(index)
+    mask = state.ulButtonPressed if ok else 0
+
+    return hmd_matrix_to_numpy(poses[index].mDeviceToAbsoluteTracking), mask
 
 
 def calibrate_tip(vr, index):
@@ -278,7 +340,18 @@ def main():
         controllers = find_controllers(vr)
 
         if not controllers:
-            print("  No controller found. Turn one on and try again.")
+            report_survey(vr)
+
+            idle = find_controllers(vr, require_tracking=False)
+
+            print()
+            if idle:
+                print("  A controller is registered but not tracking. Wake it up (press")
+                print("  the system button), and check the base stations are on - a device")
+                print("  cannot report a pose without one in view.")
+            else:
+                print("  No controller or tracker found at all. Turn one on and try again.")
+
             return 1
 
         index = controllers[0]
