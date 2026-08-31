@@ -254,3 +254,38 @@ def _is_rectangular(outline, tolerance=0.004):
 
     return (abs(xs[0] - xs[1]) < tolerance and abs(xs[2] - xs[3]) < tolerance
             and abs(ys[0] - ys[1]) < tolerance and abs(ys[2] - ys[3]) < tolerance)
+
+
+def compare_fingerprints(previous, current, tolerance_mm=20.0):
+    """
+    Whether the stage origin has been re-established since a calibration was made.
+
+    Base stations are bolted to the room, so their positions IN STAGE COORDINATES are a
+    fingerprint of the origin itself. If those coordinates move, the room did not - the
+    origin did, and every cutout stored against the old one is now wrong by that shift.
+
+    This is not a hypothetical. A recentre or a re-run room setup applies a translation AND
+    a yaw, so cutouts do not merely drift, they end up metres away and facing the wrong
+    direction. Nothing about a stored config reveals that, which is why it is fingerprinted.
+
+    `previous` and `current` map a device serial to its stage position. Returns
+    (moved, worst_mm, detail) - a device seen in only one of them is not evidence either
+    way, since base stations get switched off.
+    """
+    shared = sorted(set(previous) & set(current))
+
+    if not shared:
+        return False, 0.0, "no common reference to compare"
+
+    worst = 0.0
+    detail = []
+
+    for serial in shared:
+        a = np.asarray(previous[serial], float)
+        b = np.asarray(current[serial], float)
+        moved_mm = float(np.linalg.norm(b - a)) * 1000.0
+
+        worst = max(worst, moved_mm)
+        detail.append(f"{serial}: {moved_mm:.0f} mm")
+
+    return worst > tolerance_mm, worst, ", ".join(detail)

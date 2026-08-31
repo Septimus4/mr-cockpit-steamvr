@@ -35,7 +35,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from anchors.probe import (
-    fit_pivot, outline_from_touches, pivot_conditioning, pivot_uncertainty, tip_position,
+    compare_fingerprints, fit_pivot, outline_from_touches, pivot_conditioning,
+    pivot_uncertainty, tip_position,
 )
 from tracing.capture import hmd_matrix_to_numpy
 from tracing.config_io import DEFAULT_CONFIG_PATH, MAX_QUADS, QuadConfig, read_quads, write_quad
@@ -95,6 +96,53 @@ def survey(vr):
         })
 
     return rows
+
+
+def stage_fingerprint(vr):
+    """
+    Where the base stations are, in stage coordinates, keyed by serial.
+
+    They are bolted to the room, so these numbers describe the ORIGIN rather than the
+    hardware. Recorded with every calibration so that a later run can tell whether the
+    origin has been re-established - which silently invalidates every stored cutout.
+    """
+    import openvr
+
+    poses = vr.getDeviceToAbsoluteTrackingPose(
+        openvr.TrackingUniverseStanding, 0, openvr.k_unMaxTrackedDeviceCount)
+
+    out = {}
+
+    for i in range(openvr.k_unMaxTrackedDeviceCount):
+        if vr.getTrackedDeviceClass(i) != openvr.TrackedDeviceClass_TrackingReference:
+            continue
+
+        if not poses[i].bPoseIsValid:
+            continue
+
+        serial = vr.getStringTrackedDeviceProperty(i, openvr.Prop_SerialNumber_String)
+        m = poses[i].mDeviceToAbsoluteTracking
+        out[serial] = [float(m[j][3]) for j in range(3)]
+
+    return out
+
+
+def warn_if_origin_moved(vr, saved):
+    """Say so, loudly, if the stage origin is not the one a calibration was made against."""
+    if not saved:
+        return
+
+    moved, worst, detail = compare_fingerprints(saved, stage_fingerprint(vr))
+
+    if not moved:
+        return
+
+    print()
+    print(f"  WARNING: the stage origin has MOVED since the tip was calibrated ({detail}).")
+    print("  Base stations are bolted to the room, so it is the origin that changed, not")
+    print("  them - a recentre or a re-run room setup. Any cutout written against the old")
+    print("  origin is now wrong by that much, plus however much the yaw turned.")
+    print("  What you measure now will be correct; what was stored before will not.")
 
 
 def find_controllers(vr, require_tracking=True):
@@ -242,6 +290,7 @@ def calibrate_tip(vr, index):
                    "sigma_mm": [round(float(v) * 1000, 3) for v in sigma],
                    "spread_deg": round(spread, 1),
                    "samples": len(poses),
+                   "stage_reference": stage_fingerprint(vr),
                    # Kept so the calibration can be re-analysed - or re-solved under a
                    # better method - without asking for the pivot to be done again.
                    "poses": [[float(v) for v in m.reshape(16)] for m in poses]},
@@ -250,6 +299,14 @@ def calibrate_tip(vr, index):
 
     print(f"\n  Saved to {TIP_FILE}")
     return tip
+
+
+def load_stage_reference():
+    if not os.path.exists(TIP_FILE):
+        return None
+
+    with open(TIP_FILE) as f:
+        return json.load(f).get("stage_reference")
 
 
 def load_tip():
@@ -388,6 +445,7 @@ def main():
             return 1
 
         print(f"  tip offset {np.round(tip, 4)} m")
+        warn_if_origin_moved(vr, load_stage_reference())
 
         try:
             cutouts = measure_cutouts(vr, index, tip, a.start)

@@ -104,6 +104,25 @@ anyone reading the config or reaching for the Height slider. `level_frame` rotat
 about its own normal until Y points as near world-up as it can. A panel facing straight up
 has no meaningful "up" in its own plane, and there the original axes are kept.
 
+## The stage origin can move underneath you
+
+Cutouts are stored in **stage coordinates**, and a SteamVR recentre or a re-run room setup
+re-establishes that frame — applying a translation *and* a yaw. Every stored cutout is then
+wrong by that amount, and nothing in the config reveals it: the cutout simply stops being
+where the panel is, which reads as the measurement having been bad.
+
+Base stations are bolted to the room, so their positions **in stage coordinates** describe
+the origin rather than the hardware. `stage_fingerprint` records them with every
+calibration and `compare_fingerprints` checks them on the next run, warning above 20 mm —
+loose enough to ignore tracking jitter, tight enough that a real recentre cannot hide.
+
+A base station that is switched off is missing information, not evidence, and is not
+treated as a move.
+
+This is also the strongest argument for the runtime marker worker. Touch calibration is
+exact but static; markers are the only thing that can notice the frame has shifted and put
+the cutouts back.
+
 ## Still true from the camera path
 
 - the layer and the settings menu both own `config.ini`, so the menu must be closed

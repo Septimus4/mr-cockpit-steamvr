@@ -20,8 +20,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from anchors.probe import (
-    fit_pivot, level_frame, outline_from_touches, pivot_conditioning, plane_from_touches,
-    pivot_uncertainty, tip_position,
+    compare_fingerprints, fit_pivot, level_frame, outline_from_touches,
+    pivot_conditioning, pivot_uncertainty, plane_from_touches, tip_position,
 )
 from tracing.geometry import euler_xyz_to_matrix
 
@@ -359,6 +359,63 @@ class TestPivotUncertainty(unittest.TestCase):
 
     def test_too_few_poses_is_unbounded(self):
         self.assertFalse(np.all(np.isfinite(pivot_uncertainty([np.eye(4)] * 2, 0.001))))
+
+
+class TestStageFingerprint(unittest.TestCase):
+    """
+    Detecting that the stage origin has been re-established.
+
+    Base stations are bolted to the room, so their positions IN STAGE COORDINATES describe
+    the origin, not the hardware. When those numbers change, the room did not move - the
+    origin did, and every cutout stored against the old one is wrong by that shift plus
+    however much the yaw turned.
+
+    Nothing in a stored config reveals this. A cutout simply stops being where the panel
+    is, which reads as the measurement having been bad.
+    """
+
+    BEFORE = {"LHB-1": [0.836, 1.409, 0.389], "LHB-2": [0.166, 1.376, 0.825]}
+
+    def test_an_unchanged_origin_is_quiet(self):
+        moved, worst, _ = compare_fingerprints(self.BEFORE, dict(self.BEFORE))
+
+        self.assertFalse(moved)
+        self.assertAlmostEqual(worst, 0.0, places=9)
+
+    def test_tracking_noise_is_not_a_recentre(self):
+        jittered = {k: [v[0] + 0.003, v[1], v[2] - 0.002] for k, v in self.BEFORE.items()}
+
+        self.assertFalse(compare_fingerprints(self.BEFORE, jittered)[0])
+
+    def test_a_recentre_is_caught(self):
+        shifted = {k: [v[0] + 0.13, v[1], v[2] + 0.72] for k, v in self.BEFORE.items()}
+        moved, worst, detail = compare_fingerprints(self.BEFORE, shifted)
+
+        self.assertTrue(moved)
+        self.assertAlmostEqual(worst, 732.0, delta=1.0)
+        self.assertIn("LHB-1", detail)
+
+    def test_a_base_station_switched_off_is_not_evidence(self):
+        """One device missing means less information, not a moved origin."""
+        partial = {"LHB-1": self.BEFORE["LHB-1"]}
+
+        self.assertFalse(compare_fingerprints(self.BEFORE, partial)[0])
+
+    def test_no_common_reference(self):
+        moved, worst, detail = compare_fingerprints(self.BEFORE, {"LHB-9": [0, 0, 0]})
+
+        self.assertFalse(moved)
+        self.assertEqual(worst, 0.0)
+        self.assertIn("no common reference", detail)
+
+    def test_nothing_recorded(self):
+        self.assertFalse(compare_fingerprints({}, self.BEFORE)[0])
+
+    def test_the_tolerance_is_adjustable(self):
+        nudged = {k: [v[0] + 0.05, v[1], v[2]] for k, v in self.BEFORE.items()}
+
+        self.assertFalse(compare_fingerprints(self.BEFORE, nudged, tolerance_mm=100.0)[0])
+        self.assertTrue(compare_fingerprints(self.BEFORE, nudged, tolerance_mm=20.0)[0])
 
 
 if __name__ == "__main__":
