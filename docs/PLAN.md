@@ -224,7 +224,7 @@ nothing already built has to change for it.
 | M03 | World quads, DX11 — rectangle, manual placement | done, **verified on hardware** |
 | M04 | Vulkan parity | done, **untested on hardware** |
 | M05 | Arbitrary polygon cutouts | done, **verified on hardware** |
-| M06 | Anchor solve — bundle adjustment from markers | not started |
+| M06 | Anchor solve from markers | **in progress** — solver + 21 tests |
 | M07 | Anchor-driven pose + dynamic realignment | not started |
 | M08 | Setup UX | not started |
 
@@ -291,10 +291,38 @@ Tracing on the CAMERA image rather than the game view means drawing around the r
 hardware, with the existing calibration making the back-projection exact. No VR
 controllers needed.
 
-### M06 — anchor solve
+### M06 — anchor solve — in progress
 
-- detect markers, solve their poses by bundle adjustment, scale fixed by the id→size map
-- conditioning check before accepting a solve (PCA aspect of the marker constellation)
+`anchors/solver.py` and `anchors/synthetic.py`, with 21 tests. No hardware needed: markers
+at known poses, seen by a virtual camera at known poses, must come back where they started.
+
+**Camera poses are taken as known, not refined.** The headset is Lighthouse-tracked, so
+refining its pose against markers would be fitting noise to a worse measurement. That makes
+this per-marker PnP plus robust averaging rather than full bundle adjustment - simpler, and
+the measured constellation jitter of 0.2-0.5 mm says it is enough.
+
+Done:
+
+- [x] `solve_marker_pose` — one marker, one view, IPPE_SQUARE, world frame out
+- [x] `solve_markers` — many views, robust averaging, spread reported as confidence
+- [x] `average_rotations` — medoid-based, so an ambiguity-flipped minority cannot drag the
+      result the way an elementwise mean would
+- [x] `constellation_conditioning` — PCA aspect, refuses worse than 3:1
+- [x] `is_coplanar` — reports depth spread, since coplanar sets cannot resolve tilt
+- [x] synthetic observations, so all of the above is testable at a desk
+
+**Finding: the planar ambiguity needs a PERPENDICULAR marker.** A marker exactly square to
+the view has two poses fitting within 0.2 px and the solver may pick either. Tilt it 20
+degrees and the error goes to zero. Every real cockpit panel is tilted, so the case that
+breaks is the one that does not occur — the plate fixture, at a realistic -20 degrees,
+solves exactly from every viewpoint.
+
+Remaining:
+
+- [ ] detect markers in a real camera frame and feed the solver (needs the camera)
+- [ ] async at 5-10 Hz on a worker thread, never the render thread
+- [ ] write solved poses into the config so cutouts ride them (M07)
+
 - see [anchoring-config.md](anchoring-config.md)
 
 ### M07 — anchor-driven pose
