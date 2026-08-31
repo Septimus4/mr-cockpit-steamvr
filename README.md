@@ -35,7 +35,7 @@ break the default locations:
 
 ## Tests
 
-    .venv\Scripts\python.exe -m unittest discover -s tests      # 242, no hardware
+    .venv\Scripts\python.exe -m unittest discover -s tests      # 258, no hardware
     cd ..\rectus\src && tests\run_tests.bat                     # 62 checks, C++ mesh
 
 ## Calibrating a cockpit
@@ -82,6 +82,7 @@ freely. See [docs/m07-anchored-placement.md](docs/m07-anchored-placement.md).
 | `show_plate.py` | show markers on a USB display panel at a known physical size |
 | `show_all_plates.py` | put markers on every configured display panel at once |
 | `touch_cutouts.py` | build cutouts by touching the cockpit with a controller |
+| `reanchor.py` | bind cutouts to the markers, and restore them after a recentre |
 | `solve_anchors.py` | sweep the cockpit and solve where the markers are |
 | `place_cutouts.py` | turn solved markers into cutouts in the layer's config |
 | `make_chessboard.py` | the camera calibration target |

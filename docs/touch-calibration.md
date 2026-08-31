@@ -176,9 +176,41 @@ loose enough to ignore tracking jitter, tight enough that a real recentre cannot
 A base station that is switched off is missing information, not evidence, and is not
 treated as a move.
 
-This is also the strongest argument for the runtime marker worker. Touch calibration is
-exact but static; markers are the only thing that can notice the frame has shifted and put
-the cutouts back.
+### Binding cutouts to the markers
+
+Touch calibration is exact but **static**: it measures where a panel is now, in whatever
+frame happens to be current. Markers are stuck to the panels, so wherever the frame goes
+they go with it. Binding the two gives cutouts that survive a recentre:
+
+    python scripts/solve_anchors.py      sweep, in the SAME session as the touching
+    python scripts/reanchor.py bind      remember where the markers were
+
+then later, when the cutouts have stopped landing:
+
+    python scripts/solve_anchors.py
+    python scripts/reanchor.py restore --write
+
+`restore` fits the rigid motion carrying the remembered marker positions onto the current
+ones — that transform *is* the frame change — and carries every cutout pose through it.
+Size and outline are left alone: the panel did not change shape, only the frame it is
+described in, and rewriting them would undo any adjustment made since.
+
+**Bind in the same session you touch in.** A cutout sits on the panel its markers are stuck
+to, so the nearest marker should be within a panel-width; `binding_is_plausible` refuses
+otherwise. The first binding attempted here paired markers swept before a recentre with
+cutouts touched after one — every cutout 0.6–0.8 m from its nearest marker — which would
+have recorded a frame change that never happened and then applied it.
+
+Scale is deliberately not fitted. The markers are on panels that did not resize, so a
+marker knocked loose has to surface as residual rather than be absorbed into a plausible
+fit; above 10 mm `restore` refuses and tells you to re-measure.
+
+This is the division of labour worth keeping both methods for:
+
+| | |
+|---|---|
+| controller | measures the SHAPE exactly, buttons included |
+| markers | notice the frame moved, and put the shape back |
 
 ## Still true from the camera path
 
