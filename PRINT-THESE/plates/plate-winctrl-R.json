@@ -57,7 +57,5 @@
     "dx": 0.0,
     "dy": 0.0,
     "source": "manufacturer drawing, screen aperture assumed centred"
-  },
-  "marker_mm_effective": 31.319,
-  "marker_mm_effective_note": "measured, not drawn: a black square on a bright emissive panel blooms at its edges, so the detected border sits inside the drawn one"
+  }
 }

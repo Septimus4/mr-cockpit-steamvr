@@ -31,7 +31,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from anchors.camera_rig import CAMERA_OFFSET, D_LEFT, K_LEFT
+from anchors.camera_rig import CAMERA_OFFSET, CORNER_BIAS_PX, D_LEFT, K_LEFT
 from anchors.detect import detect_markers, make_detector, plate_size_overrides
 from anchors.solver import constellation_conditioning, is_coplanar, solve_markers
 from tracing.capture import hmd_matrix_to_numpy
@@ -221,7 +221,8 @@ def main():
                         observations=np.array(observations, dtype=object),
                         frames=np.array(sorted(cameras)),
                         cameras=np.array([cameras[k] for k in sorted(cameras)], dtype=object),
-                        camera_offset=np.array(CAMERA_OFFSET, float))
+                        camera_offset=np.array(CAMERA_OFFSET, float),
+                        corner_bias=float(CORNER_BIAS_PX))
     print(f"\n  {len(observations)} observations over {len(cameras)} frames -> {a.out}")
 
     return report(solve_markers(observations, cameras))

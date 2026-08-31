@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
 from anchors.camera_rig import (
-    CAMERA_OFFSET, CAMERA_OFFSET_LEGACY, apply_offset_delta, offset_delta,
+    CAMERA_OFFSET, CAMERA_OFFSET_LEGACY, CORNER_BIAS_PX, apply_offset_delta,
+    offset_delta,
 )
 from anchors.place import (
     _segments_cross, banded_outline, bridge_hole, cover_all, cutout_extent,
@@ -32,7 +33,7 @@ from anchors.solver import (
     marker_object_points, solve_marker_pose, solve_markers,
 )
 from anchors.detect import (
-    refresh_sizes,
+    dilate_corners, refresh_observations,
     detect_markers, is_diagnostic_id, make_detector, plate_size_overrides, summarise,
 )
 from anchors.synthetic import (
@@ -319,7 +320,7 @@ class TestDetectionEndToEnd(unittest.TestCase):
 
         self.assertEqual(sorted(drawn), [0, 1, 2, 3], "the fixture did not draw them all")
 
-        obs, rejected = detect_markers(frame, cam)
+        obs, rejected = detect_markers(frame, cam, corner_bias_px=0.0)
         self.assertEqual(sorted(o.marker_id for o in obs), [0, 1, 2, 3])
         self.assertEqual(rejected, {})
 
@@ -328,7 +329,7 @@ class TestDetectionEndToEnd(unittest.TestCase):
         markers, cam = self._scene()
         frame, _ = render_frame(cam, markers, {i: 32.8 for i in markers})
 
-        obs, _ = detect_markers(frame, cam)
+        obs, _ = detect_markers(frame, cam, corner_bias_px=0.0)
         for o in obs:
             self.assertAlmostEqual(o.size_mm, 22.4, places=3)
 
@@ -341,7 +342,7 @@ class TestDetectionEndToEnd(unittest.TestCase):
         frame, _ = render_frame(cam, markers, {i: 32.8 for i in markers})
 
         detector = make_detector()
-        obs, _ = detect_markers(frame, cam, detector=detector)
+        obs, _ = detect_markers(frame, cam, detector=detector, corner_bias_px=0.0)
 
         for o in obs:
             o.size_mm = 32.8            # what the fixture actually drew
@@ -362,7 +363,7 @@ class TestDetectionEndToEnd(unittest.TestCase):
         _, cam = self._scene()
         blank = np.full((1200, 1600), 60, np.uint8)
 
-        obs, rejected = detect_markers(blank, cam)
+        obs, rejected = detect_markers(blank, cam, corner_bias_px=0.0)
         self.assertEqual(obs, [])
         self.assertEqual(rejected, {})
 
@@ -391,7 +392,7 @@ class TestIdGuards(unittest.TestCase):
                                 [32, 33, 34, 35], 29.8)
         frame, _ = render_frame(cam, markers, {i: 29.8 for i in markers})
 
-        obs, rejected = detect_markers(frame, cam)
+        obs, rejected = detect_markers(frame, cam, corner_bias_px=0.0)
 
         self.assertEqual(obs, [], "a diagnostic marker was accepted")
         self.assertTrue(rejected, "a diagnostic marker was dropped without a reason")
@@ -405,7 +406,7 @@ class TestIdGuards(unittest.TestCase):
                                 [44, 45, 46, 47], 30.0)
         frame, _ = render_frame(cam, markers, {i: 30.0 for i in markers})
 
-        obs, rejected = detect_markers(frame, cam)
+        obs, rejected = detect_markers(frame, cam, corner_bias_px=0.0)
 
         self.assertEqual(obs, [])
         for why in rejected.values():
@@ -438,7 +439,7 @@ class TestSizeOverrides(unittest.TestCase):
     def test_override_is_used_in_preference_to_the_id(self):
         _, cam, frame = self._scene(32.8)
 
-        obs, _ = detect_markers(frame, cam, size_overrides={0: 32.8, 1: 32.8, 2: 32.8, 3: 32.8})
+        obs, _ = detect_markers(frame, cam, size_overrides={0: 32.8, 1: 32.8, 2: 32.8, 3: 32.8}, corner_bias_px=0.0)
         self.assertTrue(obs)
         for o in obs:
             self.assertAlmostEqual(o.size_mm, 32.8, places=3)
@@ -447,7 +448,7 @@ class TestSizeOverrides(unittest.TestCase):
         """Guards the regression: this is what the real capture actually did."""
         markers, cam, frame = self._scene(32.8)
 
-        obs, _ = detect_markers(frame, cam)          # id map says 22.4 mm
+        obs, _ = detect_markers(frame, cam, corner_bias_px=0.0)          # id map says 22.4 mm
         sols = solve_markers(obs, {0: cam})
 
         p = np.array([sols[i].position for i in (0, 1, 2, 3)])
@@ -460,7 +461,7 @@ class TestSizeOverrides(unittest.TestCase):
     def test_with_the_override_the_scale_is_right(self):
         markers, cam, frame = self._scene(32.8)
 
-        obs, _ = detect_markers(frame, cam, size_overrides={i: 32.8 for i in range(4)})
+        obs, _ = detect_markers(frame, cam, size_overrides={i: 32.8 for i in range(4)}, corner_bias_px=0.0)
         sols = solve_markers(obs, {0: cam})
 
         p = np.array([sols[i].position for i in (0, 1, 2, 3)])
@@ -515,7 +516,7 @@ class TestCornerRefinement(unittest.TestCase):
             for head in arc_of_head_poses((0.0, 0.0, -0.62), 0.62, 5):
                 cam = camera_at(head)
                 frame, _ = render_frame(cam, markers, sizes)
-                obs, _ = detect_markers(frame, cam, detector=det, size_overrides=sizes)
+                obs, _ = detect_markers(frame, cam, detector=det, size_overrides=sizes, corner_bias_px=0.0)
                 for o in obs:
                     r = solve_marker_pose(cam, o.corners_px, o.size_mm)
                     if r is not None:
@@ -1412,7 +1413,9 @@ class TestRealCockpitOutline(unittest.TestCase):
 
         # The same two corrections place_cutouts applies, in the same order. A test that
         # skipped them would pin an outline the tool never produces.
-        observations, _ = refresh_sizes(list(z["observations"]), plate_size_overrides())
+        observations, _, _ = refresh_observations(
+            list(z["observations"]), plate_size_overrides(),
+            float(z["corner_bias"]) if "corner_bias" in z.files else 0.0)
 
         self.solutions = solve_markers(observations, cameras)
 
@@ -1645,102 +1648,370 @@ class TestFitSimilarity(unittest.TestCase):
             self.assertGreater(k, 0.0)
 
 
-class TestEffectiveMarkerSize(unittest.TestCase):
+class TestCornerBias(unittest.TestCase):
     """
-    The size the camera MEASURES is not the size that was drawn.
+    The detector puts a marker's corners about a pixel INSIDE its true edges, so every
+    range came out 3.4% too long and every panel sat that much too far away.
 
-    A black square on a bright emissive panel blooms at its edges, so the detector finds a
-    border inside the drawn one. Measured on this hardware: 3.4%, about 0.55 mm per edge,
-    which put every panel 3.4% too far away.
-
-    Calibrating that into the plate JSON is what stops it being a flag someone has to
-    remember to pass.
+    The correction goes on the CORNERS, not on the marker size. The size is known exactly -
+    a whole number of rendered pixels at a measured pitch - and the two models diverge with
+    distance: a fixed pixel bias is a bigger fraction of a marker that is further away,
+    while a fixed size error is not. Faking the size would be right at one range only.
     """
 
-    def test_effective_size_wins_over_drawn(self):
-        import json
-        import tempfile
+    def _square(self, side, centre=(800.0, 600.0)):
+        h = side / 2.0
+        cx, cy = centre
+        return np.array([[cx - h, cy - h], [cx + h, cy - h],
+                         [cx + h, cy + h], [cx - h, cy + h]])
 
-        d = tempfile.mkdtemp()
-        plate = {"name": "p", "kind": "display", "marker_mm": 32.812,
-                 "marker_mm_effective": 31.721, "ids": [0, 1]}
+    def test_each_edge_moves_out_by_the_bias(self):
+        got = dilate_corners(self._square(60.0), 1.0)
+        side = np.mean([np.linalg.norm(got[i] - got[(i + 1) % 4]) for i in range(4)])
 
-        with open(os.path.join(d, "plate-p.json"), "w") as f:
-            json.dump(plate, f)
+        self.assertAlmostEqual(side, 62.0, places=6, msg="one pixel per edge, both edges")
 
-        got = plate_size_overrides(d)
+    def test_the_centre_does_not_move(self):
+        square = self._square(60.0, centre=(1200.0, 300.0))
+        np.testing.assert_allclose(dilate_corners(square, 1.0).mean(axis=0),
+                                   square.mean(axis=0), atol=1e-9)
 
-        self.assertAlmostEqual(got[0], 31.721, places=3)
-        self.assertAlmostEqual(got[1], 31.721, places=3)
+    def test_zero_bias_is_the_identity(self):
+        square = self._square(60.0)
+        np.testing.assert_allclose(dilate_corners(square, 0.0), square, atol=0)
 
-    def test_falls_back_to_drawn_when_uncalibrated(self):
-        import json
-        import tempfile
+    def test_a_negative_bias_shrinks(self):
+        got = dilate_corners(self._square(60.0), -1.0)
+        side = np.mean([np.linalg.norm(got[i] - got[(i + 1) % 4]) for i in range(4)])
 
-        d = tempfile.mkdtemp()
-        with open(os.path.join(d, "plate-p.json"), "w") as f:
-            json.dump({"name": "p", "kind": "display", "marker_mm": 32.812, "ids": [0]}, f)
+        self.assertAlmostEqual(side, 58.0, places=6)
 
-        self.assertAlmostEqual(plate_size_overrides(d)[0], 32.812, places=3)
+    def test_the_correction_is_relative_not_absolute(self):
+        """
+        The SAME pixel bias must matter more to a distant marker than a near one. This is
+        the whole reason it is not modelled as a smaller marker.
+        """
+        near = dilate_corners(self._square(120.0), 1.0)
+        far = dilate_corners(self._square(30.0), 1.0)
 
-    def test_shipped_plates_are_calibrated_and_smaller_than_drawn(self):
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        plates = os.path.join(root, "PRINT-THESE", "plates")
+        near_gain = np.mean([np.linalg.norm(near[i] - near[(i + 1) % 4])
+                             for i in range(4)]) / 120.0
+        far_gain = np.mean([np.linalg.norm(far[i] - far[(i + 1) % 4])
+                            for i in range(4)]) / 30.0
 
+        self.assertAlmostEqual(near_gain, 1 + 2 / 120.0, places=6)
+        self.assertAlmostEqual(far_gain, 1 + 2 / 30.0, places=6)
+        self.assertGreater(far_gain, near_gain)
+
+    def test_a_degenerate_marker_is_left_alone(self):
+        flat = np.zeros((4, 2))
+        np.testing.assert_allclose(dilate_corners(flat, 1.0), flat, atol=0)
+
+    def test_plates_declare_only_the_drawn_size(self):
+        """
+        A plate must not carry a fudged size. The drawn size is ground truth; anything
+        else belongs in the camera's calibration.
+        """
         import glob
         import json
 
-        for path in glob.glob(os.path.join(plates, "plate-winctrl-*.json")):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+        for path in glob.glob(os.path.join(root, "PRINT-THESE", "plates", "plate-*.json")):
             with open(path) as f:
                 g = json.load(f)
 
-            self.assertIn("marker_mm_effective", g, g["name"])
+            self.assertNotIn("marker_mm_effective", g, g.get("name"))
 
-            # Bloom can only ever make the detected square SMALLER. A calibration that
-            # came out larger would mean the fit had absorbed something else.
-            self.assertLess(g["marker_mm_effective"], g["marker_mm"], g["name"])
-            self.assertGreater(g["marker_mm_effective"], g["marker_mm"] * 0.9, g["name"])
+        got = plate_size_overrides(os.path.join(root, "PRINT-THESE", "plates"))
+        self.assertTrue(all(abs(v - 32.812) < 0.01 for v in got.values()), got)
 
 
-class TestRefreshSizes(unittest.TestCase):
+class TestRefreshObservations(unittest.TestCase):
     """
-    A capture stores the size each marker was solved with. Re-reading the current sizes at
-    replay time is what lets a calibration reach captures already taken - otherwise the
-    number measured FROM a sweep could only be used by the next sweep.
+    Re-applying the CURRENT calibration to a capture taken earlier.
+
+    Both corrections are applied as a DELTA against what the capture recorded. Dilating
+    corners that were already dilated would double the correction, and the result would
+    look like a fresh error rather than a repeated one.
     """
 
-    def _obs(self, size_mm=32.812):
-        return [Observation(0, np.zeros((4, 2)), np.eye(4), size_mm, 0),
-                Observation(1, np.zeros((4, 2)), np.eye(4), size_mm, 0)]
+    def _obs(self, size_mm=32.812, side=60.0):
+        h = side / 2.0
+        c = np.array([[-h, -h], [h, -h], [h, h], [-h, h]]) + 800.0
+        return [Observation(0, c, np.eye(4), size_mm, 0),
+                Observation(1, c, np.eye(4), size_mm, 0)]
 
-    def test_applies_new_sizes_and_reports_them(self):
-        out, changed = refresh_sizes(self._obs(), {0: 31.721, 1: 31.721})
+    def _side(self, o):
+        c = o.corners_px
+        return float(np.mean([np.linalg.norm(c[i] - c[(i + 1) % 4]) for i in range(4)]))
 
-        self.assertEqual(len(changed), 2)
-        self.assertAlmostEqual(out[0].size_mm, 31.721, places=3)
-        self.assertEqual(changed[0], (32.812, 31.721))
+    def test_a_legacy_capture_gets_the_full_correction(self):
+        out, _, delta = refresh_observations(self._obs(), {}, capture_bias_px=0.0)
 
-    def test_untouched_when_nothing_changed(self):
+        self.assertAlmostEqual(delta, CORNER_BIAS_PX, places=9)
+        self.assertAlmostEqual(self._side(out[0]), 60.0 + 2 * CORNER_BIAS_PX, places=6)
+
+    def test_a_current_capture_is_not_corrected_twice(self):
         obs = self._obs()
-        out, changed = refresh_sizes(obs, {0: 32.812, 1: 32.812})
+        out, _, delta = refresh_observations(obs, {}, capture_bias_px=CORNER_BIAS_PX)
 
-        self.assertEqual(changed, {})
+        self.assertAlmostEqual(delta, 0.0, places=9)
+        self.assertAlmostEqual(self._side(out[0]), 60.0, places=9)
         self.assertIs(out[0], obs[0], "an unchanged observation should not be rebuilt")
 
+    def test_sizes_are_refreshed_and_reported(self):
+        _, changed, _ = refresh_observations(self._obs(), {0: 30.0, 1: 30.0},
+                                             capture_bias_px=CORNER_BIAS_PX)
+
+        self.assertEqual(changed[0], (32.812, 30.0))
+
     def test_ids_with_no_override_keep_their_size(self):
-        """Stickers have no plate, so their size still comes from the id map."""
-        out, changed = refresh_sizes(self._obs(), {0: 31.721})
+        out, changed, _ = refresh_observations(self._obs(), {0: 30.0},
+                                               capture_bias_px=CORNER_BIAS_PX)
 
         self.assertAlmostEqual(out[1].size_mm, 32.812, places=3)
         self.assertNotIn(1, changed)
 
     def test_everything_else_survives(self):
-        obs = self._obs()
-        out, _ = refresh_sizes(obs, {0: 30.0})
+        out, _, _ = refresh_observations(self._obs(), {0: 30.0}, capture_bias_px=0.0)
 
         self.assertEqual(out[0].marker_id, 0)
         self.assertEqual(out[0].frame, 0)
         np.testing.assert_allclose(out[0].camera_to_world, np.eye(4))
+
+
+class TestRangeScale(unittest.TestCase):
+    """
+    Scaling range by scaling the assumed marker size.
+
+    A cutout that looks BOTH too small and too far away is one error, not two: a fixed
+    physical size placed too far subtends a smaller angle. Range comes from apparent size
+    (range = focal * size / pixels), so the correction belongs on the size, where it moves
+    depth and leaves every direction alone.
+
+    Nudging PosZ instead is the trap - world Z is not the direction from the eye to a
+    panel, so it drags the cutout off the panel while appearing to help.
+    """
+
+    def _observations(self, size_mm=32.812):
+        from anchors.synthetic import arc_of_head_poses, observe, plate_markers
+
+        markers = plate_markers((0.0, 1.0, -0.6), (-20.0, 0.0, 0.0), 69.0, [0, 1, 2, 3],
+                                size_mm)
+        heads = arc_of_head_poses((0.0, 1.0, -0.6), 0.5, 5)
+
+        return observe(markers, heads, {i: size_mm for i in markers})
+
+    def test_scaling_size_scales_range_proportionally(self):
+        obs, cams = self._observations()
+        base = solve_markers(obs, cams)
+
+        scaled_obs = [Observation(o.marker_id, o.corners_px, o.camera_to_world,
+                                  o.size_mm * 0.9, o.frame) for o in obs]
+        scaled = solve_markers(scaled_obs, cams)
+
+        eye = np.array([c.camera_to_world[:3, 3] for c in cams.values()]).mean(axis=0)
+
+        for marker_id in base:
+            r0 = np.linalg.norm(base[marker_id].position - eye)
+            r1 = np.linalg.norm(scaled[marker_id].position - eye)
+            self.assertAlmostEqual(r1 / r0, 0.9, delta=0.02)
+
+    def test_scaling_preserves_direction(self):
+        """The angles are the well-measured part. Only depth may move."""
+        obs, cams = self._observations()
+        base = solve_markers(obs, cams)
+
+        scaled_obs = [Observation(o.marker_id, o.corners_px, o.camera_to_world,
+                                  o.size_mm * 0.85, o.frame) for o in obs]
+        scaled = solve_markers(scaled_obs, cams)
+
+        eye = np.array([c.camera_to_world[:3, 3] for c in cams.values()]).mean(axis=0)
+
+        for marker_id in base:
+            a = base[marker_id].position - eye
+            b = scaled[marker_id].position - eye
+            cos = float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
+            self.assertGreater(cos, 0.9995, "direction to the marker must not move")
+
+    def test_a_scale_of_one_changes_nothing(self):
+        obs, cams = self._observations()
+        base = solve_markers(obs, cams)
+
+        same = solve_markers([Observation(o.marker_id, o.corners_px, o.camera_to_world,
+                                          o.size_mm * 1.0, o.frame) for o in obs], cams)
+
+        for marker_id in base:
+            np.testing.assert_allclose(same[marker_id].position,
+                                       base[marker_id].position, atol=1e-12)
+
+
+class TestMeasureRangeScale(unittest.TestCase):
+    """
+    Reading the range error off the plates' KNOWN geometry, with no headset.
+
+    This is the counterpart to fit_rigid refusing scale. Refusing it makes a range error
+    show up as residual instead of being absorbed; measuring it here says how big it is.
+    """
+
+    class _Sol:
+        def __init__(self, p, spread=1.0):
+            self.position = np.asarray(p, float)
+            self.position_spread_mm = spread
+
+    def _solutions_at_scale(self, k, pose=None):
+        pose = pose if pose is not None else pose_to_matrix((0.0, 1.0, -0.6), (-20.0, 0, 0))
+        eye = np.array([0.0, 1.1, 0.0])
+
+        out = {}
+        for i, v in plate_local_points(PLATE_C).items():
+            true = pose[:3, :3] @ v + pose[:3, 3]
+            out[i] = self._Sol(eye + k * (true - eye))     # scaled about the eye
+
+        return out
+
+    def test_reads_back_a_known_scale(self):
+        for k in (0.90, 0.975, 1.0, 1.05, 1.10):
+            got = measure_range_scale([PLATE_C], self._solutions_at_scale(k))
+
+            self.assertEqual(len(got), 1)
+            self.assertAlmostEqual(got[0][1], k, delta=0.002,
+                                   msg=f"scaling by {k} must read back as {k}")
+
+    def test_a_correct_solve_measures_one(self):
+        got = measure_range_scale([PLATE_C], self._solutions_at_scale(1.0))
+
+        self.assertAlmostEqual(got[0][1], 1.0, places=6)
+        self.assertLess(got[0][2], 1e-6, "an exact solve leaves no residual")
+
+    def test_results_are_ordered_by_confidence(self):
+        """
+        Best-conditioned first, because the caller acts on the top row. Ordering by
+        residual is the only quality signal available without ground truth.
+        """
+        good = dict(PLATE_C, name="good")
+        sols = self._solutions_at_scale(1.05)
+
+        noisy = {i: self._Sol(s.position + np.array([0.004, -0.003, 0.002]))
+                 for i, s in sols.items()}
+
+        got = measure_range_scale([good], sols)
+        got_noisy = measure_range_scale([good], noisy)
+
+        self.assertLess(got[0][2], got_noisy[0][2])
+
+    def test_a_plate_with_too_few_markers_is_skipped(self):
+        sols = self._solutions_at_scale(1.0)
+        del sols[6], sols[7]
+
+        self.assertEqual(measure_range_scale([PLATE_C], sols), [])
+
+
+class TestFitSimilarity(unittest.TestCase):
+
+    def test_recovers_scale_rotation_and_translation(self):
+        src = np.array([[0.0, 0.0, 0.0], [0.07, 0.0, 0.0],
+                        [0.07, 0.07, 0.0], [0.0, 0.07, 0.0]])
+        r_true = euler_xyz_to_matrix(-31.0, 17.0, 5.0)
+        t_true = np.array([0.2, 1.1, -0.6])
+
+        k, r, t, worst = fit_similarity(src, 1.07 * (src @ r_true.T) + t_true)
+
+        self.assertAlmostEqual(k, 1.07, places=9)
+        np.testing.assert_allclose(r, r_true, atol=1e-9)
+        np.testing.assert_allclose(t, t_true, atol=1e-9)
+        self.assertLess(worst, 1e-12)
+
+    def test_never_returns_a_reflection(self):
+        rng = np.random.default_rng(5)
+
+        for _ in range(30):
+            k, r, _, _ = fit_similarity(rng.normal(size=(5, 3)), rng.normal(size=(5, 3)))
+
+            self.assertAlmostEqual(float(np.linalg.det(r)), 1.0, places=9)
+            self.assertGreater(k, 0.0)
+
+
+class TestCornerBias(unittest.TestCase):
+    """
+    The detector puts a marker's corners about a pixel INSIDE its true edges, so every
+    range came out 3.4% too long and every panel sat that much too far away.
+
+    The correction goes on the CORNERS, not on the marker size. The size is known exactly -
+    a whole number of rendered pixels at a measured pitch - and the two models diverge with
+    distance: a fixed pixel bias is a bigger fraction of a marker that is further away,
+    while a fixed size error is not. Faking the size would be right at one range only.
+    """
+
+    def _square(self, side, centre=(800.0, 600.0)):
+        h = side / 2.0
+        cx, cy = centre
+        return np.array([[cx - h, cy - h], [cx + h, cy - h],
+                         [cx + h, cy + h], [cx - h, cy + h]])
+
+    def test_each_edge_moves_out_by_the_bias(self):
+        got = dilate_corners(self._square(60.0), 1.0)
+        side = np.mean([np.linalg.norm(got[i] - got[(i + 1) % 4]) for i in range(4)])
+
+        self.assertAlmostEqual(side, 62.0, places=6, msg="one pixel per edge, both edges")
+
+    def test_the_centre_does_not_move(self):
+        square = self._square(60.0, centre=(1200.0, 300.0))
+        np.testing.assert_allclose(dilate_corners(square, 1.0).mean(axis=0),
+                                   square.mean(axis=0), atol=1e-9)
+
+    def test_zero_bias_is_the_identity(self):
+        square = self._square(60.0)
+        np.testing.assert_allclose(dilate_corners(square, 0.0), square, atol=0)
+
+    def test_a_negative_bias_shrinks(self):
+        got = dilate_corners(self._square(60.0), -1.0)
+        side = np.mean([np.linalg.norm(got[i] - got[(i + 1) % 4]) for i in range(4)])
+
+        self.assertAlmostEqual(side, 58.0, places=6)
+
+    def test_the_correction_is_relative_not_absolute(self):
+        """
+        The SAME pixel bias must matter more to a distant marker than a near one. This is
+        the whole reason it is not modelled as a smaller marker.
+        """
+        near = dilate_corners(self._square(120.0), 1.0)
+        far = dilate_corners(self._square(30.0), 1.0)
+
+        near_gain = np.mean([np.linalg.norm(near[i] - near[(i + 1) % 4])
+                             for i in range(4)]) / 120.0
+        far_gain = np.mean([np.linalg.norm(far[i] - far[(i + 1) % 4])
+                            for i in range(4)]) / 30.0
+
+        self.assertAlmostEqual(near_gain, 1 + 2 / 120.0, places=6)
+        self.assertAlmostEqual(far_gain, 1 + 2 / 30.0, places=6)
+        self.assertGreater(far_gain, near_gain)
+
+    def test_a_degenerate_marker_is_left_alone(self):
+        flat = np.zeros((4, 2))
+        np.testing.assert_allclose(dilate_corners(flat, 1.0), flat, atol=0)
+
+    def test_plates_declare_only_the_drawn_size(self):
+        """
+        A plate must not carry a fudged size. The drawn size is ground truth; anything
+        else belongs in the camera's calibration.
+        """
+        import glob
+        import json
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+        for path in glob.glob(os.path.join(root, "PRINT-THESE", "plates", "plate-*.json")):
+            with open(path) as f:
+                g = json.load(f)
+
+            self.assertNotIn("marker_mm_effective", g, g.get("name"))
+
+        got = plate_size_overrides(os.path.join(root, "PRINT-THESE", "plates"))
+        self.assertTrue(all(abs(v - 32.812) < 0.01 for v in got.values()), got)
+
+
 
 
 if __name__ == "__main__":

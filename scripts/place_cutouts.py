@@ -32,8 +32,10 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from anchors.camera_rig import CAMERA_OFFSET, apply_offset_delta
-from anchors.detect import plate_size_overrides, refresh_sizes
+from anchors.camera_rig import (
+    CAMERA_OFFSET, CORNER_BIAS_PX as CAMERA_CORNER_BIAS, apply_offset_delta,
+)
+from anchors.detect import plate_size_overrides, refresh_observations
 from anchors.place import (
     cover_all, flattening_cost_mm, measure_range_scale, place_from_markers,
     place_from_plate, shaped_cutout,
@@ -132,65 +134,69 @@ def reset_quads(config_path, force):
     return 0
 
 
-def calibrate_plates(plates, solutions):
+def calibrate_corner_bias(plates, observations, cameras):
     """
-    Write each display plate's EFFECTIVE marker size, measured from this capture.
+    Solve the detector's corner bias, in camera pixels, from this capture.
 
-    The drawn size is not the measured size. A black square on a bright emissive panel
-    blooms at its edges, so the detector finds a border inside the one that was drawn, and
-    every range comes out proportionally too far.
+    The marker's size is known EXACTLY - a whole number of rendered pixels at a measured
+    pitch - so the thing to calibrate is not the size but how far inside the true edge the
+    detector puts the corners. That is one number for the camera, not one per panel, and
+    it stays correct at any distance, which a faked size does not.
 
-    Calibrating it into the plate JSON beats carrying a --range-scale flag around: the
-    number belongs to the panel, not to the command line, and a flag that has to be
-    remembered is a flag that will be forgotten.
+    Search is a plain scan: the cost is smooth in one variable and the whole range of
+    plausible bias is two pixels wide.
     """
-    import json
+    from anchors.detect import dilate_corners
+    from anchors.place import measure_range_scale
+    from anchors.solver import Observation
 
-    measured = measure_range_scale(plates, solutions)
+    def scale_at(bias):
+        obs = [Observation(o.marker_id, dilate_corners(o.corners_px, bias),
+                           o.camera_to_world, o.size_mm, o.frame) for o in observations]
+        rows = measure_range_scale(plates, solve_markers(obs, cameras))
 
-    if not measured:
-        print("  No plate had three solved markers, so there is nothing to calibrate.")
-        return 1
+        return (float(np.mean([k for _, k, _ in rows])), rows) if rows else (None, [])
 
-    by_name = {p["name"]: p for p in plates}
-    print(f"  {'plate':14} {'drawn':>9} {'effective':>10} {'scale':>8} {'residual':>10}")
+    print("  Solving the detector's corner bias. The marker size stays exactly as drawn.")
+    print()
+    print(f"  These observations already carry the current {CAMERA_CORNER_BIAS:.2f} px "
+          f"correction, so the")
+    print("  scan is for what is left on top of it. The total is what goes in the file.")
+    print()
+    print(f"  {'total px':>9} {'mean scale':>12}   (want 1.0000)")
 
-    for name, k, residual in measured:
-        plate = by_name.get(name)
+    best = None
 
-        if plate is None:
-            continue
+    for bias in np.arange(-1.0, 1.51, 0.125):
+        mean, rows = scale_at(float(bias))
 
-        drawn = float(plate["marker_mm"])
-        effective = drawn / k
+        if mean is None:
+            print("  No plate had three solved markers, so there is nothing to calibrate.")
+            return 1
 
-        print(f"  {name:14} {drawn:8.3f}mm {effective:9.3f}mm {k:8.4f} {residual:8.2f} mm")
+        print(f"  {CAMERA_CORNER_BIAS + bias:9.3f} {mean:12.4f}")
 
-        path = os.path.join(PLATES, f"plate-{name}.json")
+        if best is None or abs(mean - 1.0) < abs(best[1] - 1.0):
+            best = (float(bias), mean, rows)
 
-        if not os.path.exists(path):
-            print(f"    (no file at {path}, skipped)")
-            continue
-
-        with open(path) as f:
-            g = json.load(f)
-
-        g["marker_mm_effective"] = round(effective, 3)
-        g["marker_mm_effective_note"] = (
-            "measured, not drawn: a black square on a bright emissive panel blooms at its "
-            "edges, so the detected border sits inside the drawn one")
-
-        with open(path, "w") as f:
-            json.dump(g, f, indent=2)
-            f.write("\n")
+    extra, mean, rows = best
+    bias = CAMERA_CORNER_BIAS + extra
 
     print()
-    print("  Written into the plate JSONs. Placement now needs no --range-scale.")
-    print("  Re-run the calibration if the panel brightness or the camera exposure changes,")
-    print("  since the bloom that causes this depends on both.")
+    print(f"  BEST {bias:.3f} px per edge, mean scale {mean:.4f}")
+
+    for name, k, residual in rows:
+        print(f"    {name:14} scale {k:.4f}  residual {residual:.2f} mm")
+
     print()
-    print("  NOTE this is calibrated for DISPLAY panels. Printed stickers do not bloom and")
-    print("  will need their own number - that is the vinyl-vs-screen gap still unmeasured.")
+    if abs(extra) < 1e-6:
+        print(f"  That is the value already in anchors/camera_rig.py - nothing to change.")
+    else:
+        print(f"  Put this in anchors/camera_rig.py:   CORNER_BIAS_PX = {bias:.2f}")
+    print()
+    print("  It is a property of THIS camera against THIS kind of surface. Re-solve it if")
+    print("  the exposure or the panel brightness changes, and expect a different number")
+    print("  for printed stickers, which do not glow.")
 
     return 0
 
@@ -377,13 +383,18 @@ def main():
     # Marker sizes are re-read from the plates, so a calibration reaches captures already
     # taken. Without this, --calibrate would only help the NEXT sweep - and the number it
     # writes was measured from the sweep you already have.
-    if not a.calibrate:
-        observations, resized = refresh_sizes(observations, plate_size_overrides())
+    capture_bias = float(z["corner_bias"]) if "corner_bias" in z.files else 0.0
+    observations, resized, bias_delta = refresh_observations(
+        observations, plate_size_overrides(), capture_bias)
 
-        if resized:
-            first = next(iter(resized.values()))
-            print(f"  applying calibrated marker sizes to {len(resized)} observation ids "
-                  f"({first[0]:.3f} -> {first[1]:.3f} mm and similar)")
+    if abs(bias_delta) > 1e-9:
+        print(f"  correcting detector corner bias by {bias_delta:+.2f} px "
+              f"(capture had {capture_bias:.2f}, calibration is {CAMERA_CORNER_BIAS:.2f})")
+
+    if resized:
+        first = next(iter(resized.values()))
+        print(f"  marker sizes updated for {len(resized)} ids "
+              f"({first[0]:.3f} -> {first[1]:.3f} mm and similar)")
 
     if a.range_scale != 1.0:
         # Range is inferred from a marker's APPARENT size: range = focal * size / pixels.
@@ -426,7 +437,7 @@ def main():
             print("  size and the spacing together and cancels. This means the two disagree.")
 
     if a.calibrate:
-        return calibrate_plates(plates, solutions)
+        return calibrate_corner_bias(plates, observations, cameras)
 
     placed, loose = placements(solutions, plates, a.margin)
 

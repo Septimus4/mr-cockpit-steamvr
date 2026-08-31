@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from marker_ids import DIAG_BASE, DIAG_SIZES, size_of
 
+from .camera_rig import CORNER_BIAS_PX
 from .solver import Observation
 
 DIAG_LAST = DIAG_BASE + 3 * len(DIAG_SIZES) - 1
@@ -30,6 +31,35 @@ def is_diagnostic_id(marker_id):
     unknown scale into the constellation.
     """
     return DIAG_BASE <= marker_id <= DIAG_LAST
+
+
+def dilate_corners(corners_px, bias_px=None):
+    """
+    Push a detected marker's corners back out to where its edges really are.
+
+    The detector finds each edge about a pixel INSIDE the true one - see CORNER_BIAS_PX.
+    Scaling the corners away from their centroid by (side + 2*bias)/side moves every edge
+    out by `bias`, which is exact for a square and close enough for the mild perspective a
+    cockpit panel is seen under.
+
+    Corrected here rather than by shrinking the assumed marker size, because the size is
+    known exactly and the bias is not proportional to it: the same pixel error is a bigger
+    fraction of a marker that is further away.
+    """
+    bias = CORNER_BIAS_PX if bias_px is None else bias_px
+
+    c = np.asarray(corners_px, float).reshape(4, 2)
+
+    if abs(bias) < 1e-9:
+        return c
+
+    centre = c.mean(axis=0)
+    side = float(np.mean([np.linalg.norm(c[i] - c[(i + 1) % 4]) for i in range(4)]))
+
+    if side < 1e-6:
+        return c
+
+    return centre + (c - centre) * (1.0 + 2.0 * bias / side)
 
 
 def make_detector(dictionary_name="DICT_4X4_50", refine=True):
@@ -88,30 +118,27 @@ def plate_size_overrides(plates_dir=None):
         if g.get("kind") != "display":
             continue
 
-        # marker_mm is what was DRAWN. marker_mm_effective is what the camera actually
-        # measures, which is smaller: a black square on a bright emissive panel blooms at
-        # its edges, so the detected border sits inside the drawn one. Measured on this
-        # hardware at 3.4%, or about 0.55 mm per edge.
-        #
-        # Using the drawn size would put every panel 3.4% too far away - and because a
-        # cutout of fixed physical size placed further away subtends a smaller angle, it
-        # reads as the cutout being both too small and too distant.
-        size = float(g.get("marker_mm_effective") or g["marker_mm"])
-
+        # The DRAWN size, which is known exactly: a whole number of rendered pixels at a
+        # measured pitch. The detector's inward bias is corrected on the CORNERS instead -
+        # see dilate_corners - because a pixel of bias is not a fixed fraction of a size.
         for marker_id in g.get("ids", []):
-            out[int(marker_id)] = size
+            out[int(marker_id)] = float(g["marker_mm"])
 
     return out
 
 
 def detect_markers(image, camera, frame=0, detector=None, allow_diagnostic=False,
-                   size_overrides=None):
+                   size_overrides=None, corner_bias_px=None):
     """
     Find markers in one frame and return (observations, rejected).
 
     `size_overrides` maps an id to its true physical size, for markers whose size the id
     cannot describe - display panels, which render whatever fits. See
     plate_size_overrides.
+
+    `corner_bias_px` overrides the calibrated detector bias. Pass 0 for SYNTHETIC frames:
+    the bias is a physical property of a real camera looking at a real glowing panel, and
+    applying it to a rendered image would inject the very error it exists to remove.
 
     `rejected` maps a marker id to why it was skipped, so a marker that is seen but not
     used can be reported rather than silently dropped - "I stuck it on and nothing
@@ -148,7 +175,8 @@ def detect_markers(image, camera, frame=0, detector=None, allow_diagnostic=False
             rejected[marker_id] = "id has no size class, so its scale is unknown"
             continue
 
-        observations.append(Observation(marker_id, c.reshape(4, 2),
+        observations.append(Observation(marker_id,
+                                        dilate_corners(c.reshape(4, 2), corner_bias_px),
                                         camera.camera_to_world, size_mm, frame))
 
     return observations, rejected
@@ -172,31 +200,38 @@ def summarise(observations, rejected=None):
     return "\n".join(lines)
 
 
-def refresh_sizes(observations, size_overrides):
+def refresh_observations(observations, size_overrides, capture_bias_px=0.0):
     """
-    Re-apply the CURRENT marker sizes to observations recorded earlier.
+    Re-apply the CURRENT calibration to observations recorded earlier.
 
-    A capture stores the size each marker was solved with, so a later calibration would
-    otherwise not reach it and the fix would only apply to captures taken afterwards -
-    which means re-sweeping the cockpit to benefit from a number that was measured from
-    the sweep you already have.
+    Two things can have changed since a capture: the marker sizes, and the corner bias.
+    Both are applied as a DELTA against what the capture was taken with, so replaying is
+    idempotent - dilating corners that were already dilated would double the correction,
+    and the result would look like a new error rather than a repeated one.
 
-    Returns (observations, {marker_id: (old_mm, new_mm)}) so the change can be reported
-    rather than silently altering what a capture means.
+    A capture with no recorded bias predates the correction and therefore has raw corners.
+
+    Returns (observations, {marker_id: (old_mm, new_mm)}, bias_delta_px).
     """
     from .solver import Observation
 
+    delta = CORNER_BIAS_PX - float(capture_bias_px or 0.0)
     out = []
     changed = {}
 
     for o in observations:
-        size = (size_overrides or {}).get(o.marker_id)
+        size = (size_overrides or {}).get(o.marker_id, o.size_mm)
+        corners = o.corners_px
 
-        if size is None or abs(size - o.size_mm) < 1e-9:
+        if abs(delta) > 1e-9:
+            corners = dilate_corners(corners, delta)
+
+        if abs(size - o.size_mm) > 1e-9:
+            changed[o.marker_id] = (o.size_mm, size)
+
+        if abs(size - o.size_mm) < 1e-9 and abs(delta) < 1e-9:
             out.append(o)
-            continue
+        else:
+            out.append(Observation(o.marker_id, corners, o.camera_to_world, size, o.frame))
 
-        changed[o.marker_id] = (o.size_mm, size)
-        out.append(Observation(o.marker_id, o.corners_px, o.camera_to_world, size, o.frame))
-
-    return out, changed
+    return out, changed, delta

@@ -35,6 +35,22 @@ CAMERA_OFFSET_LEGACY = (-0.031, -0.047, -0.138)
 # produce exactly this.
 CAMERA_OFFSET = (-0.071, -0.047, -0.138)
 
+# How far INSIDE the true edge the detector places a marker's corners, in camera pixels.
+#
+# Measured 2026-09-01 at 1.0 px per edge. Subpixel refinement on a bright emissive panel
+# pulls the corner in: the white-to-black transition is spread over a couple of pixels by
+# the lens and the panel's own glow, and the refined corner lands short of the true edge.
+#
+# This is deliberately NOT modelled as a smaller marker. The marker's size is KNOWN
+# exactly - 210 rendered pixels at a measured pitch - and pretending otherwise would be
+# wrong in a way that changes with distance: a fixed pixel bias is a bigger fraction of a
+# marker that is further away, while a fixed size error is not. Correcting the corners
+# keeps the ground truth intact and scales correctly with range.
+#
+# Uncorrected it put every panel 3.4% too far away, which reads in the headset as a cutout
+# that is at once too small and too distant.
+CORNER_BIAS_PX = 1.0
+
 
 def offset_delta(capture_offset):
     """

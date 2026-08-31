@@ -211,35 +211,47 @@ Range is inferred from apparent size:
 so the directions to the markers are well measured and only the RANGE is in doubt. It
 depends on two numbers that could be wrong: the assumed marker size, and the focal length.
 
-### The drawn size is not the measured size
+### The detector reads each edge a pixel short
 
-Solved 2026-08-31. Two things it is NOT, both ruled out algebraically:
+Solved 2026-09-01, after a good challenge: *we know the marker size exactly, so why would
+we fake it?* Right — 210 rendered pixels at a measured pitch is 32.8125 mm and that is
+ground truth. The error is somewhere else.
 
-- a **pixel-pitch** error scales the assumed marker size and the assumed spacing together
-  and cancels
-- a **focal length** error cancels too: separation = size x (spacing_px / marker_px)
+Ruled out algebraically: a **pixel-pitch** error scales the assumed size and the assumed
+spacing together and cancels; a **focal-length** error cancels too, since
+`separation = size x (spacing_px / marker_px)`.
 
-What is left is that the camera measures the marker SMALLER than it was drawn. On a
-bright emissive panel a black square blooms at its edges, so the detected border sits
-inside the drawn one — 3.4%, about **0.55 mm per edge**. Range is inferred from apparent
-size, so every panel landed 3.4% too far away.
+Ruled out by experiment: the synthetic harness, with exact geometry and no noise, measures
+scale **1.0022 flat across tilts from 0 to -40 degrees**. The pipeline is not biased.
 
-That is calibrated per plate rather than carried on the command line, because the number
-belongs to the panel and a flag that must be remembered will be forgotten:
+What is left is the detector. Subpixel refinement on a bright emissive panel puts each
+corner about **1.0 camera pixel inside** the true edge — the white-to-black transition is
+spread by the lens and the panel's own glow, and the refined corner lands short. Solved
+from the real capture:
+
+| bias px/edge | mean scale |
+|---|---|
+| 0.00 | 1.0344 |
+| 0.50 | 1.0161 |
+| **1.00** | **0.9987** |
+| 1.50 | 0.9767 |
+
+So the correction goes on the **corners**, via `dilate_corners`, not on the size. That
+distinction matters because the two models diverge with distance: a fixed pixel bias is a
+bigger fraction of a marker that is further away, while a fixed size error is not. Faking
+the size would have been right at one range and wrong everywhere else.
+
+`CORNER_BIAS_PX` lives in `anchors/camera_rig.py` because it belongs to the camera, not to
+a panel. Captures record the bias they were taken with, so replaying applies only the
+delta — dilating already-dilated corners would double the correction.
 
     python scripts/place_cutouts.py --calibrate
 
-writes `marker_mm_effective` into each plate JSON, which `plate_size_overrides` then
-prefers over `marker_mm`. Measured: 32.812 mm drawn, **32.1 / 31.7 / 31.3 mm effective**.
-Afterwards all three plates fit at scale **1.000 ± 0.001**.
+re-solves it. Synthetic frames must pass `corner_bias_px=0`: there is no glow to correct,
+and applying it would inject the very error it exists to remove.
 
-Marker sizes are re-read at replay time, so the calibration reaches captures already
-taken — the number was measured *from* the sweep you already have, and needing a fresh
-sweep to use it would be perverse.
-
-Re-run it if panel brightness or camera exposure changes; the bloom depends on both. And
-note it is calibrated for DISPLAY panels — printed stickers do not bloom and will need
-their own number, which is the vinyl-vs-screen gap still unmeasured.
+Expect a different number for printed stickers, which do not glow. That is the
+vinyl-vs-screen gap, and it now has a way to be measured rather than guessed.
 
 **It can be measured, not guessed.** Each plate's marker layout is known, so fitting it
 *with* scale reads the error straight off — a constellation solved k times too big is
@@ -303,7 +315,7 @@ Replays the last capture — no camera, no headset — and prints what it would 
 | `--screen-shrink MM` | pull each screen hole in, default 3 mm |
 | `--range-scale K` | scale solved range; below 1 pulls the pit closer |
 | `--reset` | disable and clear every cutout, then stop |
-| `--calibrate` | measure and store each plate's effective marker size |
+| `--calibrate` | re-solve the detector's corner bias in camera pixels |
 | `--config PATH` | write somewhere else — useful for testing |
 
 Sweep once with `scripts/solve_anchors.py`, then place as many times as you like.
