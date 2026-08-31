@@ -351,7 +351,7 @@ upstream PR could not contain any of it. Where each piece ends up:
 means debugging the algorithm and the port at the same time, in the harder language, with
 a rebuild-and-restart cycle instead of a 0.3 second test run.
 
-The 238 tests are not throwaway - they are the SPECIFICATION. Once the C++ exists those
+The 242 tests are not throwaway - they are the SPECIFICATION. Once the C++ exists those
 cases become its acceptance criteria, and `render_frame` can generate fixtures for both.
 
 ### First real anchor solve, 2026-08-31 — what it found
@@ -417,7 +417,7 @@ and grows with sample count, so it reported 65 mm for a marker whose real scatte
 
 None of this would have come from the synthetic tests, which build observations with a
 perfect camera model and no time skew. Running against the real cockpit before porting was
-worth more than the 238 tests for finding it.
+worth more than the 242 tests for finding it.
 
 ### The cutouts are for the BUTTONS, not the screens
 

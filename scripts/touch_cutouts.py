@@ -44,6 +44,11 @@ from tracing.config_io import DEFAULT_CONFIG_PATH, MAX_QUADS, QuadConfig, read_q
 TIP_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                         "config-backups", "controller-tip.json")
 
+# The stage origin the current cutouts were measured against. Separate from the tip file
+# because the tip belongs to the controller and outlives any number of recentres.
+STAGE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "config-backups", "stage-reference.json")
+
 # The settings menu rewrites the whole config whenever anything changes, so anything
 # written underneath it is discarded the moment a slider moves. See place_cutouts.py.
 MENU_PROCESS = "passthrough-menu.exe"
@@ -406,11 +411,23 @@ def calibrate_tip(vr, index):
 
 
 def load_stage_reference():
-    if not os.path.exists(TIP_FILE):
-        return None
+    """
+    The origin the last calibration was made against - cutouts first, then the tip.
 
-    with open(TIP_FILE) as f:
-        return json.load(f).get("stage_reference")
+    The cutouts' reference is the one that matters: it is what the stored poses mean. The
+    tip file is only a fallback for a rig that has never had cutouts written.
+    """
+    for path in (STAGE_FILE, TIP_FILE):
+        if not os.path.exists(path):
+            continue
+
+        with open(path) as f:
+            reference = json.load(f).get("stage_reference")
+
+        if reference:
+            return reference
+
+    return None
 
 
 def load_tip():
@@ -421,21 +438,37 @@ def load_tip():
         return np.array(json.load(f)["tip_offset_m"], float)
 
 
-def measure_cutouts(vr, index, tip, start_index):
-    """Walk the user through touching one cutout after another."""
+def measure_cutouts(vr, index, tip, start_index, names=None):
+    """
+    Walk the user through touching one cutout after another, in a single session.
+
+    As many points as the shape needs, and as many shapes as there are quads. An MFD with a
+    bezel across the top is not a rectangle, and forcing it into four corners would either
+    clip the bezel or swallow the panel above it.
+    """
     import openvr
 
+    names = list(names or [])
+
     print("\n  MEASURING")
-    print("  Touch the corners of what you want to see through. Four corners for a panel,")
-    print("  or walk the edge for an irregular console - the order you touch IS the shape.")
+    print("  Walk the OUTLINE of what you want to see through, one point at a time, going")
+    print("  round the edge in order. Use as many points as the shape needs - four for a")
+    print("  plain rectangle, six for an MFD with a bezel, more for a console.")
+    print()
+    print("  Do every cutout in one session: finish one with MENU, start the next")
+    print("  immediately, and press MENU once more at the end to write them all.")
     print("\n  TRIGGER record   GRIP undo   MENU finish this cutout")
     print("  MENU with nothing pending finishes and writes.")
     print("  Ctrl+C in this terminal quits without writing anything.\n")
 
+    def label(n):
+        return names[n] if n < len(names) else f"cutout{start_index + n}"
+
     buttons = Buttons()
     cutouts = []
     points = []
-    idle_menu = 0.0
+
+    print(f"  --- {label(0)} ---")
 
     while True:
         pose, mask = read_controller(vr, index)
@@ -455,25 +488,39 @@ def measure_cutouts(vr, index, tip, start_index):
 
         if buttons.pressed(mask, openvr.k_EButton_ApplicationMenu):
             if not points:
-                print("\n  Done.")
+                if not cutouts:
+                    print("\n  Nothing measured.")
+                else:
+                    print(f"\n  Finished with {len(cutouts)} cutout(s).")
                 break
 
-            head = _head_position(vr)
-            name = f"cutout{start_index + len(cutouts)}"
-            got = outline_from_touches(name, points, head)
+            if len(points) < 3:
+                # Refused rather than silently dropped: a MENU meant as "next shape" after
+                # two stray points would otherwise lose them with no explanation.
+                print(f"    only {len(points)} point(s) - a shape needs three. GRIP to undo"
+                      f" them, or keep going.")
+                buttons.previous = mask
+                continue
 
-            if got is None:
-                print("    need at least three points")
-            else:
-                cutouts.append(got)
-                print(f"\n  {name}: {got.width * 1000:.0f} x {got.height * 1000:.0f} mm, "
-                      f"{len(points)} points, {got.flatness_mm:.1f} mm out of plane")
+            name = label(len(cutouts))
+            got = outline_from_touches(name, points, _head_position(vr))
 
-                if got.flatness_mm > 8.0:
-                    print("    ^ those touches are not flat. Did one slip off the bezel?")
+            cutouts.append(got)
+            shape = "rectangle" if not got.points else f"{len(got.points)}-point outline"
 
-                print("    next cutout, or MENU again to finish\n")
-                points = []
+            print(f"\n  {name}: {got.width * 1000:.0f} x {got.height * 1000:.0f} mm, "
+                  f"{shape}, {got.flatness_mm:.1f} mm out of plane")
+
+            if got.flatness_mm > 8.0:
+                print("    ^ those touches are not coplanar. Did one slip off the bezel, or")
+                print("      is this shape genuinely not flat?")
+
+            if start_index + len(cutouts) >= MAX_QUADS:
+                print(f"\n  That is all {MAX_QUADS} quads the layer has. Finishing.")
+                break
+
+            points = []
+            print(f"\n  --- {label(len(cutouts))} ---")
 
         buttons.previous = mask
         time.sleep(0.005)
@@ -504,6 +551,10 @@ def main():
                          "isolates the tip calibration from everything else.")
     ap.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     ap.add_argument("--start", type=int, default=0)
+    ap.add_argument("--names", default=None,
+                    help="comma-separated names for the cutouts, in the order you will "
+                         "measure them, e.g. left-mfd,centre,right-mfd,console. Names are "
+                         "cut to 15 characters, which is all Config_Quad::Name holds.")
     ap.add_argument("--force", action="store_true")
     a = ap.parse_args()
 
@@ -558,6 +609,7 @@ def main():
                 print("\n\n  Stopped. Nothing was saved.")
                 return 1
 
+        reference = stage_fingerprint(vr)
         tip = load_tip()
 
         if tip is None:
@@ -569,7 +621,8 @@ def main():
         warn_if_origin_moved(vr, load_stage_reference())
 
         try:
-            cutouts = measure_cutouts(vr, index, tip, a.start)
+            names = [n.strip() for n in a.names.split(",")] if a.names else None
+            cutouts = measure_cutouts(vr, index, tip, a.start, names)
         except KeyboardInterrupt:
             # Deliberately discards. Half-measured cutouts written to the config would be
             # worse than none: a stale enabled quad looks exactly like a bad measurement.
@@ -593,6 +646,15 @@ def main():
 
     shutil.copy2(a.config, a.config + ".bak")
     existing = read_quads(a.config)
+
+    # The origin these cutouts were measured against, so a later run can tell whether it
+    # still holds. Every cutout is stored in stage coordinates, and a recentre moves them
+    # all without leaving a trace in the config.
+    if reference:
+        with open(STAGE_FILE, "w") as f:
+            json.dump({"stage_reference": reference,
+                       "cutouts": [c.name for c in cutouts]}, f, indent=2)
+            f.write("\n")
 
     for n, c in enumerate(cutouts):
         i = a.start + n

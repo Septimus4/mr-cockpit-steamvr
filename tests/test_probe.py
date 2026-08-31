@@ -418,5 +418,68 @@ class TestStageFingerprint(unittest.TestCase):
         self.assertTrue(compare_fingerprints(self.BEFORE, nudged, tolerance_mm=20.0)[0])
 
 
+class TestBezelledPanel(unittest.TestCase):
+    """
+    A real MFD is not a rectangle. William's have a bezel across the top, so four corners
+    would either clip the bezel or swallow whatever sits above it - and the whole point of
+    a traced outline is that the cutout follows the hardware.
+    """
+
+    def _bezelled(self, euler=(-11.0, 0.0, 0.0), origin=(-0.16, 0.89, -0.49)):
+        r = euler_xyz_to_matrix(*euler)
+        o = np.asarray(origin, float)
+        local = [(-0.0835, -0.0925), (0.0835, -0.0925), (0.0835, 0.0625),
+                 (0.0500, 0.0925), (-0.0500, 0.0925), (-0.0835, 0.0625)]
+
+        return [o + r @ np.array([x, y, 0.0]) for x, y in local], local, o
+
+    def test_six_points_keep_their_outline(self):
+        pts, local, origin = self._bezelled()
+        got = outline_from_touches("left-mfd", pts, viewpoint=(0.0, 1.1, 0.0))
+
+        self.assertEqual(len(got.points), 6, "a bezelled panel must not become a rectangle")
+        self.assertAlmostEqual(got.width, 0.167, places=5)
+        self.assertAlmostEqual(got.height, 0.185, places=5)
+        np.testing.assert_allclose(got.position, origin, atol=1e-9)
+
+    def test_the_outline_is_smaller_than_its_box(self):
+        """If it came back as the bounding box, the bezel notch was lost."""
+        pts, _, _ = self._bezelled()
+        got = outline_from_touches("p", pts, viewpoint=(0.0, 1.1, 0.0))
+
+        n = len(got.points)
+        area = abs(sum(got.points[i][0] * got.points[(i + 1) % n][1] -
+                       got.points[(i + 1) % n][0] * got.points[i][1]
+                       for i in range(n))) / 2.0
+
+        self.assertLess(area, got.width * got.height * 0.99)
+
+    def test_the_touched_order_is_preserved(self):
+        pts, local, _ = self._bezelled()
+        got = outline_from_touches("p", pts, viewpoint=(0.0, 1.1, 0.0))
+
+        for (gx, gy), (lx, ly) in zip(got.points, local):
+            self.assertAlmostEqual(gx, lx, places=6)
+            self.assertAlmostEqual(gy, ly, places=6)
+
+    def test_four_bezelled_panels_fit_the_config(self):
+        """
+        The point cap is PER cutout - each has its own Quad*_Points key - so a session of
+        four six-point shapes is nowhere near it. Worth pinning, because the alternative
+        reading (one shared budget) would cap a cockpit at five panels.
+        """
+        from tracing.config_io import MAX_POINTS, MAX_QUADS, format_points, parse_points
+
+        pts, _, _ = self._bezelled()
+
+        for i in range(4):
+            got = outline_from_touches(f"p{i}", pts, viewpoint=(0.0, 1.1, 0.0))
+
+            self.assertLessEqual(len(got.points), MAX_POINTS)
+            self.assertEqual(len(parse_points(format_points(got.points))), len(got.points))
+
+        self.assertLessEqual(4, MAX_QUADS)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

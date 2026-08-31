@@ -130,6 +130,18 @@ the distance between them.
 | menu with nothing pending | finish everything and write |
 | Ctrl+C in the terminal | quit without writing anything |
 
+Use **as many points as the shape needs**. Four for a plain rectangle; six for an MFD with
+a bezel across the top, which is not a rectangle and would either lose the bezel or swallow
+whatever sits above it; more for a console. The point cap is **per cutout** — each has its
+own `Quad*_Points` key — so a session of four six-point shapes is nowhere near it.
+
+Do every cutout in one session: finish one with MENU, start the next immediately, and press
+MENU once more at the end to write them all. `--names left-mfd,centre,right-mfd,console`
+labels them in the order you measure, which beats reading `cutout0` in the menu later.
+
+Fewer than three points is refused rather than dropped — a MENU meant as "next shape" after
+two stray touches would otherwise lose them with no explanation.
+
 **The order you touch is the shape.** Walking an edge is how a person describes an outline,
 and re-sorting the points would quietly turn a deliberate concave console into its convex
 hull — exactly the shape a cockpit console is not.
